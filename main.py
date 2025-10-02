@@ -1,180 +1,152 @@
-# gesture_webview.py
-# Gestures:
-#  - Pinch + drag to scroll (uses self.scroll_gain for sensitivity)
-#  - Three-finger (thumb+index+middle extended) rotate index to zoom (0.5x–2.0x)
-#  - A-OK to quit
-#
-# Renders one of three page styles (picked at launch): tech blog, magazine, docs.
-# Local-only rendering (no network). Alpha-safe zoom to avoid "black boxes" on text.
-
 import cv2
 import mediapipe as mp
 import numpy as np
 import math
 import pygame
 import sys
-import random
 from collections import deque
+import subprocess
+import time
+import os
+import random
+import datetime
+
+# ==============================
+# Carousel config
+# ==============================
+CARD_COUNT = 7
+CARD_WIDTH = 280
+CARD_HEIGHT = 280
+CARD_SPACING = 50
+ROW_BASE_SPACING = CARD_HEIGHT + 80
+
+CAROUSEL_CATEGORIES = [
+    ["Mail", "Music", "Browser", "Messages", "Calendar", "Maps", "Camera"],
+    ["Photos", "Notes", "Reminders", "Clock", "Weather", "Stocks", "News"],
+    ["YouTube", "Netflix", "Twitch", "Spotify", "Podcasts", "Books", "Games"]
+]
+NUM_CATEGORIES = len(CAROUSEL_CATEGORIES)
+
+APP_COLORS = {
+    "Mail": (74, 144, 226), "Music": (252, 61, 86), "Safari": (35, 142, 250),
+    "Messages": (76, 217, 100), "Calendar": (252, 61, 57), "Maps": (89, 199, 249),
+    "Camera": (138, 138, 142), "Photos": (252, 203, 47), "Notes": (255, 214, 10),
+    "Reminders": (255, 69, 58), "Clock": (30, 30, 30), "Weather": (99, 204, 250),
+    "Stocks": (30, 30, 30), "News": (252, 61, 86), "YouTube": (255, 0, 0),
+    "Netflix": (229, 9, 20), "Twitch": (145, 70, 255), "Spotify": (30, 215, 96),
+    "Podcasts": (146, 72, 223), "Books": (255, 124, 45), "Games": (255, 45, 85),
+    "Browser": (35, 142, 250)
+}
 
 mp_hands = mp.solutions.hands
 
-# ------------------------- utils -------------------------
+
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
 
-def lerp(a, b, t): 
-    return a + (b - a) * t
 
-def in_view(y, h, top, bottom):
-    return (y + h) > top and y < bottom
-
-def push_clip(surface, rect):
-    prev = surface.get_clip()
-    surface.set_clip(rect)
-    return prev
-
-def pop_clip(surface, prev_clip):
-    surface.set_clip(prev_clip)
-
-# word-wrapping with clipping + optional max_lines + ellipsis
-def draw_text_wrapped_clipped(surface, text, rect, font, color, line_spacing=6, antialias=True, max_lines=None, bg=(255,255,255)):
-    words = text.split()
-    if not words:
-        return 0
-
-    # Build lines that fit width
-    lines = []
-    cur = []
-    w_limit = rect.width
-
-    for w in words:
-        candidate = (" ".join(cur + [w])).strip()
-        cw, _ = font.size(candidate)
-        if cw <= w_limit or not cur:
-            cur.append(w)
-        else:
-            lines.append(" ".join(cur))
-            cur = [w]
-    if cur:
-        lines.append(" ".join(cur))
-
-    prev_clip = push_clip(surface, rect)
-    y = rect.y
-    used_lines = 0
-    height_used = 0
-
-    line_cap = max_lines if max_lines is not None else len(lines)
-
-    for i, line in enumerate(lines[:line_cap]):
-        img = font.render(line, antialias, color)
-        line_h = img.get_height()
-        if y + line_h > rect.bottom:
-            # no space left — try to add ellipsis to the previous line
-            if used_lines > 0:
-                ell_text = lines[used_lines - 1] + "…"
-                erase_y = y - (line_h + line_spacing)
-                pygame.draw.rect(surface, bg, (rect.x, erase_y, rect.width, line_h + line_spacing))
-                # shrink with ellipsis if needed
-                ell = ell_text
-                while font.size(ell)[0] > w_limit and len(ell) > 1:
-                    ell = ell[:-2] + "…"
-                img2 = font.render(ell, antialias, color)
-                surface.blit(img2, (rect.x, erase_y))
-                height_used = (erase_y - rect.y) + img2.get_height()
-            break
-
-        surface.blit(img, (rect.x, y))
-        y += line_h + line_spacing
-        used_lines += 1
-        height_used = y - rect.y
-
-    pop_clip(surface, prev_clip)
-    return min(height_used, rect.height)
-
-def draw_pill(surface, text, x, y, font, bg, fg, pad_x=10, pad_y=6, radius=12):
-    timg = font.render(text, True, fg)
-    rect = pygame.Rect(x, y, timg.get_width() + pad_x*2, timg.get_height() + pad_y*2)
-    pygame.draw.rect(surface, bg, rect, border_radius=radius)
-    surface.blit(timg, (rect.x + pad_x, rect.y + pad_y))
-    return rect
-
-# ------------------------- smoothing -------------------------
+# ==============================
+# Carousel classes/util
+# ==============================
 class FingerSmoother:
     def __init__(self, window_size=5):
         self.thumb_history = deque(maxlen=window_size)
         self.index_history = deque(maxlen=window_size)
+
     def update(self, thumb_pos, index_pos):
         self.thumb_history.append(thumb_pos)
         self.index_history.append(index_pos)
-        tx = sum(p[0] for p in self.thumb_history)/len(self.thumb_history)
-        ty = sum(p[1] for p in self.thumb_history)/len(self.thumb_history)
-        ix = sum(p[0] for p in self.index_history)/len(self.index_history)
-        iy = sum(p[1] for p in self.index_history)/len(self.index_history)
+        tx = sum(p[0] for p in self.thumb_history) / len(self.thumb_history)
+        ty = sum(p[1] for p in self.thumb_history) / len(self.thumb_history)
+        ix = sum(p[0] for p in self.index_history) / len(self.index_history)
+        iy = sum(p[1] for p in self.index_history) / len(self.index_history)
         return (tx, ty), (ix, iy)
-    def reset(self):
-        self.thumb_history.clear(); self.index_history.clear()
 
-# ------------------------- state -------------------------
-class BrowserState:
+    def reset(self):
+        self.thumb_history.clear()
+        self.index_history.clear()
+
+
+class HandState:
     def __init__(self):
-        # scroll (content_y_offset=80, page moves with scroll_y in [-max,0])
-        self.scroll_y = 0.0
-        self.smooth_scroll_y = 0.0
+        self.card_offset = 0.0
+        self.category_offset = 0.0
+        self.smooth_card_offset = 0.0
+        self.smooth_category_offset = 0.0
+        self.scroll_smoothing = 0.25
+        self.scroll_gain = 5.0
+
         self.is_pinching = False
         self.last_pinch_x = None
         self.last_pinch_y = None
-        self.pinch_threshold = 0.08
+        self.pinch_start_pos = None
+        self.movement_threshold = 10
 
-        # NEW: scroll sensitivity (higher = more scroll per movement)
-        self.scroll_gain = 2.0
-
-        # text + hand smoothing
+        self.selected_card = None
+        self.selected_category = None
+        self.zoom_progress = 0.0
+        self.zoom_target = 0.0
         self.finger_smoother = FingerSmoother(window_size=5)
 
-        # A-OK to quit
-        self.ok_prev = False
-        self.ok_touch_threshold = 0.035
-
-        # page metrics (updated per frame by layout function)
-        self.page_height = 3400
-
-        # Zoom controls (three-finger rotate)
-        self.zoom_level = 1.0
-        self.zoom_min = 0.5
-        self.zoom_max = 2.0
-        self.zoom_sensitivity = 0.15
-
+        # zoom wheel
         self.wheel_active = False
-        self.wheel_angle = 0.0
+        self.wheel_angle = math.pi
         self.last_finger_angle = None
         self.wheel_center_x = 0
         self.wheel_center_y = 0
         self.wheel_radius = 110
+        self.gui_scale = 1.00
+        self.gui_scale_min = 0.60
+        self.gui_scale_max = 1.80
+        self.gui_scale_sensitivity = 0.32
 
-        # Which page style to render (1, 2, or 3)
-        self.page_style = random.choice([1, 2, 3])
+        # pinch timing - now for launch detection only
+        self.pinch_threshold = 0.08
+        self.pinch_prev = False
+        self.last_pinch_time = 0
+        self.double_pinch_window = 0.4
 
-# ------------------------- gestures -------------------------
+        # misc
+        self.browser_process = None
+        self.email_process = None
+        self.maps_process = None
+        self.current_fps = 0.0
+        self.active_hand = None  # NEW: track which hand is active
+
+        # A-OK gesture to reset zoom
+        self.ok_prev = False
+        self.ok_touch_threshold = 0.025
+
+
 def get_pinch_distance(landmarks):
-    if not landmarks: return None
-    a = landmarks[4]; b = landmarks[8]
+    if not landmarks:
+        return None
+    a = landmarks[4]
+    b = landmarks[8]
     return math.hypot(a.x - b.x, a.y - b.y)
+
 
 def is_pinching(landmarks, thresh):
     d = get_pinch_distance(landmarks)
     return (d is not None) and (d < thresh)
 
+
 def get_pinch_position(landmarks):
-    if not landmarks: return None
-    a = landmarks[4]; b = landmarks[8]
+    if not landmarks:
+        return None
+    a = landmarks[4]
+    b = landmarks[8]
     return ((a.x + b.x) / 2, (a.y + b.y) / 2)
+
 
 def is_finger_extended(landmarks, tip_id, pip_id):
     return landmarks[tip_id].y < landmarks[pip_id].y
 
+
 def detect_three_finger_gesture(landmarks):
-    if not landmarks: return False
-    thumb_tip = landmarks[4]; thumb_mcp = landmarks[2]; wrist = landmarks[0]
+    thumb_tip = landmarks[4]
+    thumb_mcp = landmarks[2]
+    wrist = landmarks[0]
     thumb_ext = abs(thumb_tip.x - wrist.x) > abs(thumb_mcp.x - wrist.x) * 0.8
     index_ext = is_finger_extended(landmarks, 8, 6)
     middle_ext = is_finger_extended(landmarks, 12, 10)
@@ -182,601 +154,543 @@ def detect_three_finger_gesture(landmarks):
     pinky_fold = landmarks[20].y > landmarks[18].y - 0.02
     return thumb_ext and index_ext and middle_ext and ring_fold and pinky_fold
 
-def get_hand_center(landmarks): 
-    return landmarks[9]
 
-def calculate_finger_angle(landmarks):
-    c = get_hand_center(landmarks); idx = landmarks[8]
-    return math.atan2(idx.y - c.y, idx.x - c.x)
-
-def detect_ok_gesture(landmarks, touch_thresh):
-    if not landmarks: return False
-    a = landmarks[4]; b = landmarks[8]
+def detect_ok_gesture(landmarks, touch_thresh=0.025):
+    if not landmarks:
+        return False
+    a = landmarks[4]
+    b = landmarks[8]
     touching = math.hypot(a.x - b.x, a.y - b.y) < touch_thresh
     middle_ext = is_finger_extended(landmarks, 12, 10)
-    ring_ext   = is_finger_extended(landmarks, 16, 14)
-    pinky_ext  = is_finger_extended(landmarks, 20, 18)
-    return touching and middle_ext and ring_ext and pinky_ext
+    ring_ext = is_finger_extended(landmarks, 16, 14)
+    pinky_ext = is_finger_extended(landmarks, 20, 18)
+    # Additional check: ensure middle, ring, pinky are significantly extended
+    # This makes the gesture more reliable across both hands
+    middle_really_ext = landmarks[12].y < landmarks[10].y - 0.03
+    ring_really_ext = landmarks[16].y < landmarks[14].y - 0.03
+    pinky_really_ext = landmarks[20].y < landmarks[18].y - 0.03
+    return touching and middle_really_ext and ring_really_ext and pinky_really_ext
 
-# ------------------------- chrome -------------------------
-def draw_browser_chrome(surface, width, height):
-    # top toolbar
-    pygame.draw.rect(surface, (255,255,255), (0,0,width,72))
-    # subtle shadow
-    for i in range(6):
-        alpha = 90 - i*15
-        s = pygame.Surface((width,1), pygame.SRCALPHA)
-        s.fill((0,0,0,alpha))
-        surface.blit(s,(0,72+i))
 
-    # tabs area
-    pygame.draw.rect(surface, (240,242,245), (0,0,width,34))
-    active_tab = pygame.Rect(12,6,240,26)
-    pygame.draw.rect(surface, (255,255,255), active_tab, border_radius=8)
-    icon_col = (66,133,244)
-    pygame.draw.circle(surface, icon_col, (active_tab.x+14, active_tab.y+13), 6)
-    font_tab = pygame.font.SysFont('arial', 16, bold=True)
-    surface.blit(font_tab.render("TechFlow – Latest", True, (32,33,36)),
-                 (active_tab.x+28, active_tab.y+6))
+def get_hand_center(landmarks):
+    return landmarks[9]
 
-    # address bar
-    addr_rect = pygame.Rect(120, 40, width-240, 24)
-    pygame.draw.rect(surface, (245,247,250), addr_rect, border_radius=12)
-    pygame.draw.rect(surface, (226,232,240), addr_rect, 1, border_radius=12)
-    font_url = pygame.font.SysFont('consolas', 16)
-    surface.blit(font_url.render("https://example.local", True, (60,64,67)),
-                 (addr_rect.x+12, addr_rect.y+4))
 
-    # right controls (profile dot + menu)
-    pygame.draw.circle(surface, (234,67,53), (width-56, 52), 12)
-    for i in range(3):
-        pygame.draw.circle(surface, (95,99,104), (width-24, 48+i*6), 2)
+def calculate_finger_angle(landmarks):
+    c = get_hand_center(landmarks)
+    idx = landmarks[8]
+    return math.atan2(idx.y - c.y, idx.x - c.x)
 
-# ------------------------- page style 1: tech blog -------------------------
-ARTICLES = [
-    {
-        "title": "Inside Small Language Models: Why Tiny Can Be Mighty",
-        "author": "Mina Patel",
-        "date": "Oct 1, 2025",
-        "tag": "AI",
-        "excerpt": "Distilled architectures and retrieval-aware adapters are letting sub-1B parameter models punch far above their weight. Here’s how teams are shipping fast inference without giving up quality."
-    },
-    {
-        "title": "RISC-V on the Edge: Real Workloads, Real Numbers",
-        "author": "Alex Garner",
-        "date": "Sep 28, 2025",
-        "tag": "Chips",
-        "excerpt": "Benchmarks can mislead. We profile camera, speech, and tinyML pipelines on commodity RISC-V boards, then contrast them against ARM in identical power envelopes."
-    },
-    {
-        "title": "Privacy by Construction: Telemetry That Doesn’t Phone Home",
-        "author": "Jules Ortega",
-        "date": "Sep 22, 2025",
-        "tag": "Privacy",
-        "excerpt": "Event logs are invaluable—until they aren’t. We show a pattern for on-device aggregation with noise injection and delayed release, keeping dashboards useful and users untracked."
-    },
-    {
-        "title": "WebGPU in Production: What Broke and What Stuck",
-        "author": "Sofie N.",
-        "date": "Sep 18, 2025",
-        "tag": "Frontend",
-        "excerpt": "Shader portability is better than expected, debugging is worse, and the DX12/Vulkan drivers are the real story. Our migration notes from Canvas2D to compute shaders."
-    },
-    {
-        "title": "Postgres as a Vector DB Without the Pain",
-        "author": "Dee Park",
-        "date": "Sep 12, 2025",
-        "tag": "Data",
-        "excerpt": "With pgvector, HNSW indexes, and logical partitioning, we sustain 50K QPS of hybrid search on a single cluster—no separate datastore, no mystery billing line items."
-    },
-]
-POPULAR = [
-    "The Forgotten Costs of Cold Starts",
-    "Ten Debugging Habits of Senior Engineers",
-    "A Practical Guide to GPU Memory Fragmentation",
-    "What We Learned Running 500 Canary Releases a Day",
-    "Queues, Backpressure, and Sane Retries"
-]
-TAGS = ["AI","ML","Chips","Privacy","Frontend","Data","DevOps","Security","Edge","Open Source"]
 
-def draw_hero(surface, x, y, w, h):
-    prev = push_clip(surface, pygame.Rect(x, y, w, h))
-    for i in range(h):
-        t = i / max(1,h-1)
-        r = int(lerp(26, 59, t))
-        g = int(lerp(47,130, t))
-        b = int(lerp(96,246, t))
-        pygame.draw.line(surface, (r,g,b), (x, y+i), (x+w, y+i))
-    title_font = pygame.font.SysFont('arial', 54, bold=True)
-    sub_font   = pygame.font.SysFont('arial', 22)
-    surface.blit(title_font.render("The Future of Building", True, (255,255,255)), (x+36, y+120))
-    surface.blit(title_font.render("Is Smaller, Faster, Local", True, (255,255,255)), (x+36, y+180))
-    surface.blit(sub_font.render("Opinion • Tooling • Deep Dives", True, (230,240,255)), (x+36, y+240))
-    btn = pygame.Rect(x+36, y+290, 200, 44)
-    pygame.draw.rect(surface, (255,255,255), btn, border_radius=22)
-    cta = pygame.font.SysFont('arial', 20, bold=True).render("Start Reading →", True, (40,90,200))
-    surface.blit(cta, (btn.x+24, btn.y+10))
-    pop_clip(surface, prev)
+# NEW: Function to get the active hand (prioritize right, but use left if right not present)
+def get_active_hand(results):
+    """Returns (landmarks, hand_label) for the active hand, or (None, None)"""
+    if not results.multi_hand_landmarks or not results.multi_handedness:
+        return None, None
+    
+    right_hand = None
+    left_hand = None
+    
+    for hl, hd in zip(results.multi_hand_landmarks, results.multi_handedness):
+        label = hd.classification[0].label
+        if label == "Right":
+            right_hand = hl.landmark
+        elif label == "Left":
+            left_hand = hl.landmark
+    
+    # Prefer right hand, but use left if right not available
+    if right_hand is not None:
+        return right_hand, "Right"
+    elif left_hand is not None:
+        return left_hand, "Left"
+    else:
+        return None, None
 
-def draw_sidebar_card(surface, rect, title, items, kind="list"):
-    pygame.draw.rect(surface, (255,255,255), rect, border_radius=12)
-    pygame.draw.rect(surface, (226,232,240), rect, 1, border_radius=12)
-    title_font = pygame.font.SysFont('arial', 18, bold=True)
-    surface.blit(title_font.render(title, True, (17,24,39)), (rect.x+14, rect.y+12))
 
-    content_area = pygame.Rect(rect.x+12, rect.y+44, rect.w-24, rect.h-56)
-    prev = push_clip(surface, content_area)
+# ==============================
+# Launch helpers (Browser / Email)
+# ==============================
+def _search_paths_for(basename_or_path):
+    if not basename_or_path:
+        return None
+    p = os.path.expanduser(basename_or_path)
+    if os.path.isabs(p) and os.path.isfile(p):
+        return p
 
-    if kind == "list":
-        item_font = pygame.font.SysFont('arial', 16)
-        y = content_area.y
-        for t in items[:12]:
-            line_h = item_font.get_height()
-            if y + line_h > content_area.bottom:
-                break
-            dot = pygame.Rect(content_area.x, y+6, 6, 6)
-            pygame.draw.ellipse(surface, (59,130,246), dot)
-            text_rect = pygame.Rect(content_area.x+16, y, content_area.w-18, line_h)
-            draw_text_wrapped_clipped(surface, t, text_rect, item_font, (55,65,81), line_spacing=0, max_lines=1)
-            y += max(22, line_h+6)
-
-    elif kind == "tags":
-        tag_font = pygame.font.SysFont('arial', 14)
-        x = content_area.x; y = content_area.y
-        for tag in items:
-            pill = tag_font.render(tag, True, (31,41,55))
-            pill_rect = pygame.Rect(x, y, pill.get_width()+16, pill.get_height()+10)
-            if pill_rect.right > content_area.right:
-                x = content_area.x
-                y += pill_rect.height + 6
-                pill_rect = pygame.Rect(x, y, pill.get_width()+16, pill.get_height()+10)
-            if pill_rect.bottom > content_area.bottom:
-                break
-            pygame.draw.rect(surface, (241,245,249), pill_rect, border_radius=12)
-            surface.blit(pill, (pill_rect.x+8, pill_rect.y+5))
-            x = pill_rect.right + 6
-
-    elif kind == "newsletter":
-        body = "Get weekly deep dives and no-fluff tutorials. No ads. Unsubscribe anytime."
-        body_font = pygame.font.SysFont('arial', 16)
-        used = draw_text_wrapped_clipped(surface, body, content_area, body_font, (71,85,105))
-        y = content_area.y + used + 10
-        inp = pygame.Rect(content_area.x, y, content_area.w, 32)
-        if inp.bottom <= content_area.bottom:
-            pygame.draw.rect(surface, (249,250,251), inp, border_radius=16)
-            pygame.draw.rect(surface, (226,232,240), inp, 1, border_radius=16)
-            input_font = pygame.font.SysFont('arial', 16)
-            surface.blit(input_font.render("you@company.com", True, (148,163,184)), (inp.x+12, inp.y+7))
-            y = inp.bottom + 8
-        btn = pygame.Rect(content_area.x, y, content_area.w, 34)
-        if btn.bottom <= content_area.bottom:
-            pygame.draw.rect(surface, (59,130,246), btn, border_radius=17)
-            btn_font = pygame.font.SysFont('arial', 16, bold=True)
-            bt = btn_font.render("Subscribe", True, (255,255,255))
-            surface.blit(bt, (btn.x + btn.w//2 - bt.get_width()//2, btn.y + 8))
-
-    pop_clip(surface, prev)
-
-def draw_article_card(surface, rect, title, author, date, tag, excerpt):
-    pygame.draw.rect(surface, (255,255,255), rect, border_radius=12)
-    pygame.draw.rect(surface, (226,232,240), rect, 1, border_radius=12)
-    img_h = 140
-    prev = push_clip(surface, rect)
-    for i in range(img_h):
-        t = i / max(1,img_h-1)
-        r = int(lerp(240, 200, t))
-        g = int(lerp(248, 210, t))
-        b = int(lerp(255, 240, t))
-        pygame.draw.line(surface, (r,g,b), (rect.x, rect.y+i), (rect.x+rect.w, rect.y+i))
-    tag_font = pygame.font.SysFont('arial', 14, bold=True)
-    draw_pill(surface, tag.upper(), rect.x+12, rect.y+12, tag_font, (59,130,246), (255,255,255))
-    pop_clip(surface, prev)
-
-    pad = 14
-    y = rect.y + img_h + 12
-    inner = pygame.Rect(rect.x+pad, y, rect.w-2*pad, rect.h - img_h - 2*pad)
-    title_font = pygame.font.SysFont('arial', 22, bold=True)
-    meta_font  = pygame.font.SysFont('arial', 14)
-    body_font  = pygame.font.SysFont('arial', 16)
-
-    title_h = draw_text_wrapped_clipped(surface, title, pygame.Rect(inner.x, inner.y, inner.w, 56),
-                                        title_font, (15,23,42), line_spacing=4, max_lines=2)
-    cur_y = inner.y + title_h + 6
-    meta = f"{author}  •  {date}"
-    meta_img = meta_font.render(meta, True, (100,116,139))
-    if cur_y + meta_img.get_height() <= inner.bottom:
-        surface.blit(meta_img, (inner.x, cur_y))
-    cur_y += 24
-    remain_h = max(0, inner.bottom - cur_y)
-    if remain_h > 0:
-        draw_text_wrapped_clipped(surface, excerpt, pygame.Rect(inner.x, cur_y, inner.w, remain_h),
-                                  body_font, (55,65,81))
-
-def layout_blog(surface, width, height, scroll_y):
-    content_top = 80
-    view_top, view_bottom = content_top, height
-    pygame.draw.rect(surface, (255,255,255), (0, content_top, width, height-content_top))
-
-    # hero
-    hero_h = 420
-    hero_rect = pygame.Rect(0, content_top + int(scroll_y), width, hero_h)
-    if in_view(hero_rect.y, hero_rect.h, view_top, view_bottom):
-        draw_hero(surface, hero_rect.x, hero_rect.y, hero_rect.w, hero_rect.h)
-
-    # grid columns
-    pad = 64
-    gutter = 28
-    main_w = int(width * 0.62)
-    side_w = width - pad*2 - gutter - main_w
-    main_x = pad
-    side_x = main_x + main_w + gutter
-
-    y = content_top + int(scroll_y) + hero_h + 28
-
-    # section: Latest Posts
-    section_font = pygame.font.SysFont('arial', 26, bold=True)
-    surface.blit(section_font.render("Latest Posts", True, (17,24,39)), (main_x, y))
-    y += 12
-    pygame.draw.rect(surface, (59,130,246), (main_x, y, 60, 3))
-    y += 20
-
-    card_h = 270
-    for a in ARTICLES[:4]:
-        rect = pygame.Rect(main_x, y, main_w, card_h)
-        if in_view(rect.y, rect.h, view_top, view_bottom):
-            draw_article_card(surface, rect, a["title"], a["author"], a["date"], a["tag"], a["excerpt"])
-        y += card_h + 16
-
-    # section: Featured
-    surface.blit(section_font.render("Featured", True, (17,24,39)), (main_x, y+8))
-    pygame.draw.rect(surface, (234,88,12), (main_x, y+40, 80, 3))
-    y += 56
-    feat_rect = pygame.Rect(main_x, y, main_w, 220)
-    if in_view(feat_rect.y, feat_rect.h, view_top, view_bottom):
-        draw_article_card(surface, feat_rect,
-                          "A Playbook for Sub-Second UIs on the Modern Web",
-                          "Rhea Singh", "Sep 10, 2025", "Frontend",
-                          "Latency budgets, speculative rendering, streaming HTML, and where hydration actually helps. What we shipped to keep complex dashboards at 60fps.")
-    y += feat_rect.h + 40
-
-    # sidebar
-    side_y = content_top + int(scroll_y) + hero_h + 28
-    sb1 = pygame.Rect(side_x, side_y, side_w, 240)
-    if in_view(sb1.y, sb1.h, view_top, view_bottom):
-        draw_sidebar_card(surface, sb1, "Popular", POPULAR, kind="list")
-    side_y += sb1.h + 16
-
-    sb2 = pygame.Rect(side_x, side_y, side_w, 180)
-    if in_view(sb2.y, sb2.h, view_top, view_bottom):
-        draw_sidebar_card(surface, sb2, "Tags", TAGS, kind="tags")
-    side_y += sb2.h + 16
-
-    sb3 = pygame.Rect(side_x, side_y, side_w, 220)
-    if in_view(sb3.y, sb3.h, view_top, view_bottom):
-        draw_sidebar_card(surface, sb3, "Newsletter", [], kind="newsletter")
-    side_y += sb3.h + 40
-
-    # footer
-    page_bottom = max(y, side_y) + 40
-    footer_y = page_bottom
-    draw_footer(surface, 0, footer_y, width)
-    page_total_height = (footer_y + 220) - content_top
-    return page_total_height
-
-def draw_footer(surface, x, y, w):
-    pygame.draw.rect(surface, (17,24,39), (x, y, w, 220))
-    title = pygame.font.SysFont('arial', 18, bold=True).render("TechFlow", True, (255,255,255))
-    surface.blit(title, (x+28, y+26))
-    col_font = pygame.font.SysFont('arial', 16, bold=True)
-    item_font = pygame.font.SysFont('arial', 14)
-    cols = [
-        ("Product", ["Features","Pricing","Changelog","Support"]),
-        ("Company", ["About","Blog","Jobs","Press"]),
-        ("Resources", ["Docs","Guides","API","Community"]),
-        ("Legal", ["Privacy","Terms","Cookies"]),
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.getcwd(), p),
+        os.path.join(script_dir, p)
     ]
-    cx = x + 220
-    for name, items in cols:
-        surface.blit(col_font.render(name, True, (226,232,240)), (cx, y+28))
-        yy = y+56
-        for it in items:
-            surface.blit(item_font.render(it, True, (148,163,184)), (cx, yy))
-            yy += 22
-        cx += 200
-    copy = pygame.font.SysFont('arial', 14).render("© 2025 TechFlow. All rights reserved.", True, (148,163,184))
-    surface.blit(copy, (x + w - copy.get_width() - 28, y + 26))
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
 
-# ------------------------- page style 2: magazine -------------------------
-MAG_HEADLINES = [
-    ("Chip Shortages Ease, But Backlogs Remain", "Supply Chain"),
-    ("LLM Distillation Gets Practical In Prod", "AI"),
-    ("Faster Build Systems: Lessons From 1M CI Minutes", "DevOps"),
-    ("New WebGPU Debugging Tools Land", "Frontend"),
-    ("Edge Compute Expands To Storefronts", "Edge"),
-    ("Privacy Sandboxes: The Tradeoffs", "Privacy"),
-]
 
-def layout_magazine(surface, width, height, scroll_y):
-    content_top = 80
-    view_top, view_bottom = content_top, height
-    pygame.draw.rect(surface, (255,255,255), (0, content_top, width, height-content_top))
+def try_spawn(candidates_or_paths):
+    last_err = None
+    env_app = os.environ.get("GESTURE_EMAIL_APP")
+    if env_app:
+        resolved = _search_paths_for(env_app)
+        if resolved:
+            try:
+                return subprocess.Popen([sys.executable, resolved])
+            except Exception as e:
+                last_err = e
 
-    # masthead
-    mast = pygame.font.SysFont('georgia', 56, bold=True).render("Tech Journal", True, (20,20,20))
-    surface.blit(mast, (40, content_top + int(scroll_y) + 10))
+    for name in candidates_or_paths:
+        resolved = _search_paths_for(name)
+        if not resolved:
+            continue
+        try:
+            return subprocess.Popen([sys.executable, resolved])
+        except Exception as e:
+            last_err = e
 
-    # hero bar
-    hero_y = content_top + int(scroll_y) + 80
-    hero_h = 320
-    if in_view(hero_y, hero_h, view_top, view_bottom):
-        for i in range(hero_h):
-            t = i/hero_h
-            col = (int(255 - 40*t), int(245 - 80*t), int(220 - 160*t))
-            pygame.draw.line(surface, col, (0, hero_y+i), (width, hero_y+i))
-        # hero text
-        title_font = pygame.font.SysFont('arial', 36, bold=True)
-        body_font  = pygame.font.SysFont('arial', 18)
-        surface.blit(title_font.render("The State of Compute 2025", True, (20,20,20)), (60, hero_y+40))
-        para = "Cloud meets edge in surprising ways. Schedulers are friendlier, costs are not, and accelerators are getting weird."
-        draw_text_wrapped_clipped(surface, para, pygame.Rect(60, hero_y+90, width-120, 90), body_font, (55,55,55))
+    if last_err:
+        raise last_err
+    raise FileNotFoundError("No candidate script found")
 
-    # grid of stories
-    grid_y = hero_y + hero_h + 24
-    col_w = (width - 120) // 3
-    x0 = 40
-    y = grid_y
-    card_h = 220
-    for i, (title, tag) in enumerate(MAG_HEADLINES):
-        cx = x0 + (i % 3) * (col_w + 20)
-        cy = y + (i // 3) * (card_h + 18)
-        rect = pygame.Rect(cx, cy, col_w, card_h)
-        if in_view(rect.y, rect.h, view_top, view_bottom):
-            pygame.draw.rect(surface, (255,255,255), rect, border_radius=12)
-            pygame.draw.rect(surface, (226,232,240), rect, 1, border_radius=12)
-            # image stripe
-            for k in range(80):
-                t = k/80
-                pygame.draw.line(surface, (220, 240-int(100*t), 255-int(40*t)),
-                                 (rect.x, rect.y+k), (rect.right, rect.y+k))
-            tag_font = pygame.font.SysFont('arial', 14, bold=True)
-            draw_pill(surface, tag.upper(), rect.x+12, rect.y+12, tag_font, (40,90,200), (255,255,255))
-            # title
-            tf = pygame.font.SysFont('arial', 20, bold=True)
-            draw_text_wrapped_clipped(surface, title, pygame.Rect(rect.x+12, rect.y+92, rect.w-24, 46), tf, (20,20,20), line_spacing=4, max_lines=2)
-            # teaser
-            bf = pygame.font.SysFont('arial', 16)
-            teaser = "Read our reporting from teams running these systems at scale."
-            draw_text_wrapped_clipped(surface, teaser, pygame.Rect(rect.x+12, rect.y+140, rect.w-24, 62), bf, (60,60,60))
 
-    # footer
-    page_bottom = y + ((len(MAG_HEADLINES)+2)//3) * (card_h + 18) + 40
-    footer_y = page_bottom
-    pygame.draw.rect(surface, (245,246,248), (0, footer_y, width, 160))
-    small = pygame.font.SysFont('arial', 16)
-    surface.blit(small.render("© 2025 Tech Journal", True, (80,80,90)), (40, footer_y+20))
-    return (footer_y + 160) - content_top
+def launch_browser_window(state):
+    if state.browser_process is None or state.browser_process.poll() is not None:
+        try:
+            state.browser_process = try_spawn(["gesture_webview.py", "browser_window.py"])
+            print("✓ BROWSER WINDOW LAUNCHED!")
+        except Exception as e:
+            print(f"Error launching browser: {e}")
 
-# ------------------------- page style 3: docs site -------------------------
-DOC_SECTIONS = [
-    ("Getting Started", "Install the CLI, authenticate, and deploy your first service in under five minutes."),
-    ("Configuration", "Every option is a key-value pair. We support YAML, TOML, and JSON with the same schema."),
-    ("Scaling", "Choose between request-based autoscaling or concurrency-based autoscaling. Both support cooldowns."),
-    ("Observability", "Use structured logs, traces, and custom metrics. All export to OpenTelemetry by default."),
-    ("Security", "Service-to-service auth is mutual TLS by default. You can rotate credentials without redeploys."),
-]
 
-def draw_code_block(surface, rect, lines):
-    pygame.draw.rect(surface, (250, 250, 250), rect, border_radius=8)
-    pygame.draw.rect(surface, (225, 228, 232), rect, 1, border_radius=8)
-    mono = pygame.font.SysFont('consolas', 16)
-    y = rect.y + 8
-    clip_prev = push_clip(surface, rect)
-    for ln in lines:
-        img = mono.render(ln, True, (40, 40, 45))
-        if y + img.get_height() > rect.bottom:
-            break
-        surface.blit(img, (rect.x + 10, y))
-        y += img.get_height() + 4
-    pop_clip(surface, clip_prev)
+def launch_email_window(state):
+    if state.email_process is not None and state.email_process.poll() is None:
+        return
 
-def layout_docs(surface, width, height, scroll_y):
-    content_top = 80
-    pygame.draw.rect(surface, (255,255,255), (0, content_top, width, height-content_top))
+    try:
+        state.email_process = try_spawn(["my_email.py", "email.py", "gesture_mail_inbox.py", "email_inbox.py"])
+        print("✉️  EMAIL WINDOW LAUNCHED!")
+        return
+    except Exception as e:
+        print(f"Email script not found / failed to start external: {e}")
 
-    # left nav
-    nav_w = 260
-    nav_x = 40
-    nav_y = content_top + int(scroll_y) + 10
-    pygame.draw.rect(surface, (248,249,251), (nav_x, nav_y, nav_w, 520), border_radius=12)
-    pygame.draw.rect(surface, (226,232,240), (nav_x, nav_y, nav_w, 520), 1, border_radius=12)
-    nav_font = pygame.font.SysFont('arial', 16)
-    y = nav_y + 16
-    for i, (title, _) in enumerate(DOC_SECTIONS):
-        bullet = "• " if i != 0 else "▶ "
-        img = nav_font.render(bullet + title, True, (40,44,52))
-        surface.blit(img, (nav_x + 12, y))
-        y += img.get_height() + 8
+    try:
+        state.email_process = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--email-fallback"])
+        print("✉️  EMAIL FALLBACK LAUNCHED (embedded)!")
+    except Exception as e:
+        print(f"Error launching embedded email fallback: {e}")
 
-    # main content
-    main_x = nav_x + nav_w + 24
-    main_w = width - main_x - 40
-    y = content_top + int(scroll_y) + 10
 
-    h1 = pygame.font.SysFont('arial', 32, bold=True)
-    h2 = pygame.font.SysFont('arial', 22, bold=True)
-    p  = pygame.font.SysFont('arial', 18)
+def launch_maps_window(state):
+    if state.maps_process is not None and state.maps_process.poll() is None:
+        return
+    
+    try:
+        state.maps_process = try_spawn(["gesture_maps.py", "maps.py", "my_maps.py"])
+        print("🗺️  MAPS WINDOW LAUNCHED!")
+    except Exception as e:
+        print(f"Error launching maps: {e}")
 
-    surface.blit(h1.render("Deploys: A Practical Guide", True, (20,20,25)), (main_x, y))
-    y += 42
-    para = "This document covers everything you need to ship services reliably: environments, progressive delivery, rollbacks, and safety valves."
-    draw_text_wrapped_clipped(surface, para, pygame.Rect(main_x, y, main_w, 60), p, (60,60,70))
-    y += 76
 
-    for title, body in DOC_SECTIONS:
-        surface.blit(h2.render(title, True, (25,30,40)), (main_x, y))
-        y += 30
-        used = draw_text_wrapped_clipped(surface, body, pygame.Rect(main_x, y, main_w, 70), p, (65,70,78))
-        y += used + 8
-        # code sample
-        code = [
-            "$ tool auth login",
-            "$ tool deploy --env=prod",
-            "Deploying… done",
-            "URL: https://service.example",
-        ]
-        cb = pygame.Rect(main_x, y, main_w, 110)
-        draw_code_block(surface, cb, code)
-        y += cb.height + 22
+# ==============================
+# Carousel drawing
+# ==============================
+def draw_app_icon(surface, app_name, x, y, base_w, base_h, is_selected=False, zoom_scale=1.0, gui_scale=1.0):
+    width = int(base_w * gui_scale)
+    height = int(base_h * gui_scale)
+    if is_selected:
+        width = int(width * zoom_scale)
+        height = int(height * zoom_scale)
+    br = max(12, int(50 * gui_scale))
+    rect = pygame.Rect(x - width // 2, y - height // 2, width, height)
+    color = tuple(min(255, int(APP_COLORS.get(app_name, (100, 100, 100))[i] * 1.2)) for i in range(3))
+    pygame.draw.rect(surface, color, rect, border_radius=br)
+    if is_selected:
+        sel = pygame.Rect(rect.x - int(6 * gui_scale), rect.y - int(6 * gui_scale),
+                          rect.width + int(12 * gui_scale), rect.height + int(12 * gui_scale))
+        pygame.draw.rect(surface, (255, 255, 255), sel, width=max(2, int(8 * gui_scale)), border_radius=br)
+    icon_font = pygame.font.Font(None, max(24, int(120 * (width / max(1, int(base_w * gui_scale))))))
+    icon_img = icon_font.render(app_name[0], True, (255, 255, 255, 180))
+    surface.blit(icon_img, icon_img.get_rect(center=(x, y - int(20 * gui_scale))))
+    text_size = max(12, int(36 * (width / max(1, int(base_w * gui_scale)))))
+    font = pygame.font.Font(None, text_size)
+    text_img = font.render(app_name, True, (255, 255, 255))
+    surface.blit(text_img, text_img.get_rect(center=(x, y + int(60 * gui_scale))))
+    return rect
 
-    # footer
-    foot_y = y + 20
-    pygame.draw.rect(surface, (245,246,248), (0, foot_y, width, 140))
-    surface.blit(pygame.font.SysFont('arial', 16).render("Docs © 2025", True, (80,80,90)), (40, foot_y+20))
-    return (foot_y + 140) - content_top
 
-# ------------------------- main -------------------------
-def main():
+def draw_cards(surface, center_x, center_y, card_offset, category_idx,
+               selected_card=None, selected_category=None, zoom_progress=0.0,
+               window_width=1280, gui_scale=1.0, base_w=280, base_h=280, base_spacing=50):
+    app_names = CAROUSEL_CATEGORIES[category_idx]
+    card_rects = []
+    sw = int(base_w * gui_scale)
+    ss = int(base_spacing * gui_scale)
+    stride = sw + ss
+    first_vis = int((-card_offset - window_width // 2) / stride) - 1
+    last_vis = int((-card_offset + window_width // 2) / stride) + 2
+    first_vis = max(0, first_vis)
+    last_vis = min(CARD_COUNT, last_vis)
+    for i in range(first_vis, last_vis):
+        x = int(center_x + (i * stride) + card_offset)
+        y = int(center_y)
+        sel = (selected_card == i and selected_category == category_idx)
+        if not sel:
+            rect = draw_app_icon(surface, app_names[i], x, y, base_w, base_h, False, 1.0, gui_scale)
+            card_rects.append((rect, i, category_idx))
+    for i in range(first_vis, last_vis):
+        x = int(center_x + (i * stride) + card_offset)
+        y = int(center_y)
+        sel = (selected_card == i and selected_category == category_idx)
+        if sel:
+            rect = draw_app_icon(surface, app_names[i], x, y, base_w, base_h, True, 1.0 + (zoom_progress * 0.3), gui_scale)
+            card_rects.append((rect, i, category_idx))
+    return card_rects
+
+
+def draw_wheel(surface, state, window_width, window_height):
+    if not state.wheel_active:
+        return
+    scale = state.gui_scale
+    cx = state.wheel_center_x
+    cy = state.wheel_center_y
+    r = int(state.wheel_radius * scale)
+    white = (255, 255, 255)
+    for i in range(5):
+        rr = r + int(15 * scale) + i * int(10 * scale)
+        op = int(100 - i * 20)
+        s = pygame.Surface((window_width, window_height), pygame.SRCALPHA)
+        pygame.draw.circle(s, (*white, op), (cx, cy), rr, max(1, int(2 * scale)))
+        surface.blit(s, (0, 0))
+    pygame.draw.circle(surface, white, (cx, cy), r, max(1, int(4 * scale)))
+    pygame.draw.circle(surface, white, (cx, cy), r - int(20 * scale), max(1, int(2 * scale)))
+    segs = 48
+    prog = int((state.wheel_angle / (2 * math.pi)) * segs) % segs
+    ir = r - int(10 * scale)
+    for i in range(prog):
+        sa = math.radians(i * 360 / segs) - math.pi / 2
+        ea = math.radians((i + 1) * 360 / segs) - math.pi / 2
+        sx = cx + int(ir * math.cos(sa))
+        sy = cy + int(ir * math.sin(sa))
+        ex = cx + int(ir * math.cos(ea))
+        ey = cy + int(ir * math.sin(ea))
+        pygame.draw.line(surface, white, (sx, sy), (ex, ey), max(1, int(6 * scale)))
+    pl = r - int(30 * scale)
+    px = cx + int(pl * math.cos(state.wheel_angle))
+    py = cy + int(pl * math.sin(state.wheel_angle))
+    pygame.draw.line(surface, white, (cx, cy), (px, py), max(1, int(3 * scale)))
+    pygame.draw.circle(surface, white, (px, py), max(2, int(6 * scale)))
+    pygame.draw.circle(surface, white, (cx, cy), max(2, int(8 * scale)))
+    font = pygame.font.Font(None, max(18, int(40 * scale)))
+    t = font.render(f"GUI {state.gui_scale:.2f}x", True, white)
+    tr = t.get_rect(center=(cx, cy + r + int(44 * scale)))
+    bg = pygame.Rect(tr.x - int(10 * scale), tr.y - int(5 * scale), tr.width + int(20 * scale), tr.height + int(10 * scale))
+    pygame.draw.rect(surface, (20, 20, 20), bg)
+    pygame.draw.rect(surface, white, bg, max(1, int(2 * scale)))
+    surface.blit(t, tr)
+
+
+def lm_to_screen(lm, W, H):
+    return (lm.x * W, lm.y * H)
+
+
+# ==============================
+# Carousel main
+# ==============================
+def carousel_main():
     pygame.init()
-    WINDOW_WIDTH = 1200
-    WINDOW_HEIGHT = 800
+    WINDOW_WIDTH = 1280
+    WINDOW_HEIGHT = 720
     screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-    pygame.display.set_caption("Gesture WebView — Hands-First Browser")
+    pygame.display.set_caption("Gesture Carousel • ⌘ Works with LEFT or RIGHT hand • Pinch to launch")
     clock = pygame.time.Clock()
 
-    print("="*50)
-    print("GESTURE WEBVIEW")
-    print("Pinch & drag to scroll • Three-finger rotate to zoom • A-OK to quit")
-    print("="*50)
+    print("=" * 50)
+    print("GESTURE CAROUSEL STARTED")
+    print("Works with EITHER hand - use whichever is comfortable!")
+    print("Pinch-drag to scroll • Pinch Mail/Browser/Maps to launch")
+    print("=" * 50)
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("ERROR: Could not open camera!"); return
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        print("ERROR: Could not open camera!")
+        return
+    # REDUCED RESOLUTION FOR BETTER FPS
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
-    hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.5,
-                           min_tracking_confidence=0.5, model_complexity=0)
+    # ONLY 1 HAND for better performance
+    hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.5, min_tracking_confidence=0.5, model_complexity=0)
 
-    state = BrowserState()
-    print(f"Page style selected: {state.page_style}")
-
+    state = HandState()
+    tap_to_check = None
+    double_pinch_to_check = None
     running = True
 
     while running:
         for event in pygame.event.get():
-            if event.type == pygame.QUIT: running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE: running = False
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                running = False
 
         ret, frame = cap.read()
         if not ret:
-            pygame.display.flip(); clock.tick(60); continue
+            continue
         frame = cv2.flip(frame, 1)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb)
 
-        right_hand = None
-        if results.multi_hand_landmarks and results.multi_handedness:
-            for hl, hd in zip(results.multi_hand_landmarks, results.multi_handedness):
-                if hd.classification[0].label == "Right":
-                    right_hand = hl.landmark
+        fps = clock.get_fps()
+        if fps > 0:
+            state.current_fps = (0.9 * state.current_fps + 0.1 * fps) if state.current_fps > 0 else fps
 
-        # Three-finger wheel -> zoom
-        if right_hand and detect_three_finger_gesture(right_hand):
+        # NEW: Get the active hand (right preferred, left as fallback)
+        active_hand, hand_label = get_active_hand(results)
+
+        # Update active hand tracking
+        if hand_label:
+            if state.active_hand != hand_label:
+                print(f"🖐️  Switched to {hand_label} hand")
+                state.active_hand = hand_label
+        elif state.active_hand:
+            state.active_hand = None
+
+        if active_hand is None:
+            state.finger_smoother.reset()
+            state.wheel_active = False
+            state.last_finger_angle = None
+
+        # A-OK resets GUI zoom to default
+        ok_now = detect_ok_gesture(active_hand, state.ok_touch_threshold) if active_hand else False
+        if ok_now and not state.ok_prev:
+            state.gui_scale = 1.0
+            state.wheel_active = False
+            state.last_finger_angle = None
+            print("A-OK detected — GUI scale reset to 1.00x")
+        state.ok_prev = ok_now
+
+        pinch_now = is_pinching(active_hand, state.pinch_threshold) if active_hand else False
+
+        # Three-finger wheel gesture (zoom)
+        if active_hand and detect_three_finger_gesture(active_hand):
             if not state.wheel_active:
-                hc = get_hand_center(right_hand)
+                hc = get_hand_center(active_hand)
                 state.wheel_active = True
                 state.wheel_center_x = int(hc.x * WINDOW_WIDTH)
                 state.wheel_center_y = int(hc.y * WINDOW_HEIGHT)
                 state.last_finger_angle = None
-            ang = calculate_finger_angle(right_hand)
+            ang = calculate_finger_angle(active_hand)
             if state.last_finger_angle is not None:
                 diff = ang - state.last_finger_angle
-                if diff > math.pi: diff -= 2*math.pi
-                elif diff < -math.pi: diff += 2*math.pi
-                state.wheel_angle = (state.wheel_angle + diff*2) % (2*math.pi)
-                state.zoom_level = clamp(state.zoom_level + diff*state.zoom_sensitivity,
-                                         state.zoom_min, state.zoom_max)
+                if diff > math.pi:
+                    diff -= 2 * math.pi
+                elif diff < -math.pi:
+                    diff += 2 * math.pi
+                state.wheel_angle = (state.wheel_angle + diff * 2) % (2 * math.pi)
+                state.gui_scale = clamp(
+                    state.gui_scale + diff * state.gui_scale_sensitivity,
+                    state.gui_scale_min, state.gui_scale_max
+                )
             state.last_finger_angle = ang
         else:
             state.wheel_active = False
             state.last_finger_angle = None
 
-        # A-OK to quit
-        ok_now = detect_ok_gesture(right_hand, state.ok_touch_threshold) if right_hand else False
-        if ok_now and not state.ok_prev:
-            print("A-OK received — closing.")
-            running = False
-        state.ok_prev = ok_now
+        # Pinch handling: distinguish scroll from selection
+        if active_hand and not state.wheel_active:
+            pos = get_pinch_position(active_hand)
+            
+            # Pinch just started
+            if pinch_now and not state.pinch_prev:
+                if pos:
+                    px = pos[0] * WINDOW_WIDTH
+                    py = pos[1] * WINDOW_HEIGHT
+                    state.pinch_start_pos = (px, py)
+                    state.last_pinch_x = px
+                    state.last_pinch_y = py
+                    state.is_pinching = True
 
-        # pinch scroll (only when not in wheel mode)
-        if right_hand and not state.wheel_active:
-            pinch_now = is_pinching(right_hand, state.pinch_threshold)
-            pos = get_pinch_position(right_hand)
-            if pinch_now and pos:
-                px = pos[0]*WINDOW_WIDTH; py = pos[1]*WINDOW_HEIGHT
-                if state.is_pinching and state.last_pinch_y is not None:
-                    dy = (py - state.last_pinch_y) * state.scroll_gain  # <<< SCROLL GAIN HERE
-                    state.scroll_y += dy
-                    max_scroll_y = max(0, state.page_height - (WINDOW_HEIGHT - 80))
-                    state.scroll_y = clamp(state.scroll_y, -max_scroll_y, 0)
-                state.last_pinch_x = px; state.last_pinch_y = py; state.is_pinching = True
-            else:
+            # Pinch continuing
+            elif pinch_now and state.pinch_prev and pos:
+                px = pos[0] * WINDOW_WIDTH
+                py = pos[1] * WINDOW_HEIGHT
+                if state.last_pinch_x is not None:
+                    dx = px - state.last_pinch_x
+                    dy = py - state.last_pinch_y
+                    
+                    # Check if we've moved enough to start scrolling
+                    if state.pinch_start_pos:
+                        total_dx = px - state.pinch_start_pos[0]
+                        total_dy = py - state.pinch_start_pos[1]
+                        total_move = math.hypot(total_dx, total_dy)
+                        
+                        # Only scroll if past movement threshold
+                        if total_move > state.movement_threshold:
+                            state.card_offset += dx * state.scroll_gain
+                            state.category_offset += dy * state.scroll_gain
+                            stride_x = int((CARD_WIDTH + CARD_SPACING) * state.gui_scale)
+                            min_x = -(CARD_COUNT - 1) * stride_x
+                            state.card_offset = clamp(state.card_offset, min_x, 0)
+                            row_stride = int(ROW_BASE_SPACING * state.gui_scale)
+                            min_y = -(NUM_CATEGORIES - 1) * row_stride
+                            state.category_offset = clamp(state.category_offset, min_y, 0)
+                
+                state.last_pinch_x = px
+                state.last_pinch_y = py
+
+            # Pinch released
+            elif not pinch_now and state.pinch_prev:
+                if state.pinch_start_pos and state.last_pinch_x is not None:
+                    total_dx = state.last_pinch_x - state.pinch_start_pos[0]
+                    total_dy = state.last_pinch_y - state.pinch_start_pos[1]
+                    total_move = math.hypot(total_dx, total_dy)
+
+                    current_time = time.time()
+                    dt = current_time - state.last_pinch_time
+
+                    # If minimal movement, this is a SELECT action
+                    if total_move <= state.movement_threshold:
+                        tap_to_check = (state.last_pinch_x, state.last_pinch_y)
+                        
+                        # Check for double-pinch (for launch)
+                        if 0.05 < dt < state.double_pinch_window:
+                            double_pinch_to_check = (state.last_pinch_x, state.last_pinch_y)
+                            print("✓ Double pinch detected — will launch card under finger")
+
+                    state.last_pinch_time = current_time
+
                 state.is_pinching = False
-                state.last_pinch_x = None; state.last_pinch_y = None
+                state.last_pinch_x = None
+                state.last_pinch_y = None
+                state.pinch_start_pos = None
         else:
             state.is_pinching = False
-            state.last_pinch_x = None; state.last_pinch_y = None
+            state.last_pinch_x = None
+            state.last_pinch_y = None
+            state.pinch_start_pos = None
+
+        state.pinch_prev = pinch_now
+
+        # Smooth offsets
+        s = state.scroll_smoothing
+        state.smooth_card_offset += (state.card_offset - state.smooth_card_offset) * s
+        state.smooth_category_offset += (state.category_offset - state.smooth_category_offset) * s
+
+        # Draw carousel
+        screen.fill((20, 20, 30))
+        cx = WINDOW_WIDTH // 2
+        cy = WINDOW_HEIGHT // 2
+        all_rects = []
+        row_stride = int(ROW_BASE_SPACING * state.gui_scale)
+        first_cat = max(0, int(-state.smooth_category_offset / row_stride) - 1)
+        last_cat = min(NUM_CATEGORIES, int((-state.smooth_category_offset + WINDOW_HEIGHT) / row_stride) + 2)
+        for cat_idx in range(first_cat, last_cat):
+            y = cy + (cat_idx * row_stride) + state.smooth_category_offset
+            all_rects += draw_cards(
+                screen, cx, int(y), state.smooth_card_offset, cat_idx,
+                state.selected_card, state.selected_category, state.zoom_progress,
+                WINDOW_WIDTH, state.gui_scale, CARD_WIDTH, CARD_HEIGHT, CARD_SPACING
+            )
+
+        # Resolve single pinch launch
+        if tap_to_check:
+            tx, ty = tap_to_check
+            launched = False
+            for rect, ci, ca in all_rects:
+                if rect.collidepoint(tx, ty):
+                    app_name = CAROUSEL_CATEGORIES[ca][ci]
+                    if app_name == "Mail":
+                        launch_email_window(state)
+                        print(f"✓ PINCH ON MAIL — LAUNCHING EMAIL!")
+                        launched = True
+                    elif app_name == "Browser":
+                        launch_browser_window(state)
+                        print(f"✓ PINCH ON BROWSER — LAUNCHING WINDOW!")
+                        launched = True
+                    elif app_name == "Maps":
+                        launch_maps_window(state)
+                        print(f"✓ PINCH ON MAPS — LAUNCHING MAPS!")
+                        launched = True
+                    else:
+                        # Select other cards
+                        state.selected_card = ci
+                        state.selected_category = ca
+                        state.zoom_target = 1.0
+                        print(f"✓ Selected: {app_name} (card {ci}, category {ca})")
+                        launched = True
+                    break
+            if not launched:
+                print("Pinch didn't hit a card")
+            tap_to_check = None
+
+        # Resolve double-pinch launch
+        if double_pinch_to_check:
+            dx, dy = double_pinch_to_check
+            launched = False
+            for rect, ci, ca in all_rects:
+                if rect.collidepoint(dx, dy):
+                    app_name = CAROUSEL_CATEGORIES[ca][ci]
+                    if app_name == "Mail":
+                        launch_email_window(state)
+                        print("✓✓✓ DOUBLE PINCH ON MAIL — LAUNCHING EMAIL! ✓✓✓")
+                        launched = True
+                    elif app_name == "Browser":
+                        launch_browser_window(state)
+                        print("✓✓✓ DOUBLE PINCH ON BROWSER — LAUNCHING WINDOW! ✓✓✓")
+                        launched = True
+                    elif app_name == "Maps":
+                        launch_maps_window(state)
+                        print("✓✓✓ DOUBLE PINCH ON MAPS — LAUNCHING MAPS! ✓✓✓")
+                        launched = True
+                    else:
+                        print(f"Double pinch on {app_name} — no action bound")
+                    break
+            if not launched:
+                print("Double pinch location didn't hit a card")
+            double_pinch_to_check = None
+
+        # Wheel overlay
+        draw_wheel(screen, state, WINDOW_WIDTH, WINDOW_HEIGHT)
+
+        # Camera preview
+        frame_surface = pygame.surfarray.make_surface(cv2.transpose(rgb))
+        frame_surface = pygame.transform.scale(frame_surface, (320, 240))
+        screen.blit(frame_surface, (WINDOW_WIDTH - 330, 10))
+
+        # Hand HUD
+        if active_hand:
+            tt = active_hand[4]
+            it = active_hand[8]
+            (tx, ty), (ix, iy) = state.finger_smoother.update(
+                lm_to_screen(tt, WINDOW_WIDTH, WINDOW_HEIGHT),
+                lm_to_screen(it, WINDOW_WIDTH, WINDOW_HEIGHT)
+            )
+            if not state.wheel_active and pinch_now:
+                pygame.draw.line(screen, (255, 255, 255), (int(tx), int(ty)), (int(ix), int(iy)), 2)
+            pygame.draw.circle(screen, (255, 255, 255), (int(tx), int(ty)), 8)
+            pygame.draw.circle(screen, (255, 255, 255), (int(ix), int(iy)), 8)
+        else:
             state.finger_smoother.reset()
 
-        # smooth scroll
-        state.smooth_scroll_y += (state.scroll_y - state.smooth_scroll_y) * 0.28
-
-        # draw
-        screen.fill((255,255,255))
-
-        # zoom rendering path (alpha-safe)
-        s = state.zoom_level
-        if abs(s - 1.0) > 0.001:
-            zw = int(WINDOW_WIDTH * s)
-            zh = int(WINDOW_HEIGHT * s)
-            zoom_surf = pygame.Surface((zw, zh), pygame.SRCALPHA).convert_alpha()
-            zoom_surf.fill((255, 255, 255, 255))
-
-            if state.page_style == 1:
-                ph = layout_blog(zoom_surf, zw, zh, state.smooth_scroll_y * s)
-            elif state.page_style == 2:
-                ph = layout_magazine(zoom_surf, zw, zh, state.smooth_scroll_y * s)
-            else:
-                ph = layout_docs(zoom_surf, zw, zh, state.smooth_scroll_y * s)
-
-            draw_browser_chrome(zoom_surf, zw, zh)
-            scaled = pygame.transform.smoothscale(zoom_surf, (WINDOW_WIDTH, WINDOW_HEIGHT)).convert_alpha()
-            screen.blit(scaled, (0,0))
-            state.page_height = int(ph / s)
-        else:
-            if state.page_style == 1:
-                ph = layout_blog(screen, WINDOW_WIDTH, WINDOW_HEIGHT, state.smooth_scroll_y)
-            elif state.page_style == 2:
-                ph = layout_magazine(screen, WINDOW_WIDTH, WINDOW_HEIGHT, state.smooth_scroll_y)
-            else:
-                ph = layout_docs(screen, WINDOW_WIDTH, WINDOW_HEIGHT, state.smooth_scroll_y)
-            draw_browser_chrome(screen, WINDOW_WIDTH, WINDOW_HEIGHT)
-            state.page_height = ph
-
-        # wheel overlay
+        # Status text with active hand indicator
+        font = pygame.font.Font(None, 48)
+        hand_indicator = f"[{state.active_hand} hand]" if state.active_hand else ""
         if state.wheel_active:
-            draw_wheel(screen, state, WINDOW_WIDTH, WINDOW_HEIGHT)
-
-        # hand HUD (index fingertip only)
-        if right_hand:
-            it = right_hand[8]
-            ix = int(it.x * WINDOW_WIDTH); iy = int(it.y * WINDOW_HEIGHT)
-            pygame.draw.circle(screen, (200,200,200), (ix, iy), 6, 2)
-
-        # status
-        font = pygame.font.SysFont('arial', 18, bold=True)
-        status = f"Zoom {state.zoom_level:.2f}x • Scroll {int(-state.scroll_y)}/{max(0, state.page_height - (WINDOW_HEIGHT-80))} • Style {state.page_style}"
-        srf = font.render(status, True, (90, 98, 110))
-        screen.blit(srf, (16, WINDOW_HEIGHT-28))
+            status = f"WHEEL • GUI {state.gui_scale:.2f}x {hand_indicator}"
+        elif state.is_pinching:
+            if state.pinch_start_pos and state.last_pinch_x:
+                total_dx = state.last_pinch_x - state.pinch_start_pos[0]
+                total_dy = state.last_pinch_y - state.pinch_start_pos[1]
+                total_move = math.hypot(total_dx, total_dy)
+                if total_move > state.movement_threshold:
+                    status = f"SCROLLING {hand_indicator}"
+                else:
+                    status = f"PINCHED (hold to select) {hand_indicator}"
+            else:
+                status = f"PINCHED {hand_indicator}"
+        else:
+            status = f"Ready {hand_indicator} • Use LEFT or RIGHT hand • Pinch-drag to scroll"
+        screen.blit(font.render(status, True, (255, 255, 255)), (30, 30))
 
         pygame.display.flip()
         clock.tick(60)
@@ -785,28 +699,283 @@ def main():
     pygame.quit()
     sys.exit()
 
-def draw_wheel(surface, state, window_width, window_height):
-    cx = state.wheel_center_x; cy = state.wheel_center_y; r = state.wheel_radius
-    white = (255,255,255)
-    for i in range(5):
-        rr = r + 15 + i*10; op = int(100 - i*20)
-        s = pygame.Surface((window_width, window_height), pygame.SRCALPHA)
-        pygame.draw.circle(s, (*white, op), (cx, cy), rr, 2); surface.blit(s,(0,0))
-    pygame.draw.circle(surface, white, (cx, cy), r, 3)
-    pygame.draw.circle(surface, white, (cx, cy), r-20, 1)
-    segs = 48; prog = int((state.wheel_angle/(2*math.pi))*segs) % segs; ir = r-10
-    for i in range(prog):
-        sa = math.radians(i*360/segs)-math.pi/2; ea = math.radians((i+1)*360/segs)-math.pi/2
-        sx = cx+int(ir*math.cos(sa)); sy = cy+int(ir*math.sin(sa))
-        ex = cx+int(ir*math.cos(ea)); ey = cy+int(ir*math.sin(ea))
-        pygame.draw.line(surface, white, (sx,sy), (ex,ey), 5)
-    pl = r-28; px = cx+int(pl*math.cos(state.wheel_angle)); py = cy+int(pl*math.sin(state.wheel_angle))
-    pygame.draw.line(surface, white, (cx,cy), (px,py), 2)
-    pygame.draw.circle(surface, white, (px,py), 5)
-    pygame.draw.circle(surface, white, (cx,cy), 7)
-    font = pygame.font.SysFont('arial', 24, bold=True)
-    t = font.render(f"Zoom {state.zoom_level:.2f}x", True, white)
-    surface.blit(t, (cx - t.get_width()//2, cy + r + 18))
 
+# ==============================
+# Embedded Email Fallback (runs in separate process)
+# ==============================
+def _make_fake_emails(n=60):
+    SENDERS = [
+        "Lena from Summation", "Nadia (Infra)", "Core Team Updates",
+        "Billing Bot", "Product Announce", "Priya @ ML", "Marketing Ops",
+        "Ahmed • Security", "Bruno (Design)", "Support", "CI Logs", "The Ops Room"
+    ]
+    SUBJECTS = [
+        "Standup notes & priorities", "Your invoice is ready",
+        "Quarterly planning: draft agenda", "Welcome to the beta",
+        "Alert: action required on deployment", "Design review — nav cleanup",
+        "Incident postmortem draft", "Metrics weekly recap",
+        "Invitation: user research sessions", "Release train R42 checklist",
+        "Reminder: security training", "Infra cost dashboard — July"
+    ]
+    SNIPPETS = [
+        "Sharing quick notes from the sync today. We agreed to cut scope…",
+        "Hi there! Your invoice for September is now available. You can…",
+        "Here's a rough draft for next quarter's planning doc. Please…",
+        "You're in! Start by exploring the quick start guide and sample…",
+        "We detected a failing canary in us-west-2. Rollback is prepared…",
+        "Attaching comps with the nav collapsed and with tabs. Feedback…",
+        "Root cause was a misconfigured retry policy. We'll add guards…",
+        "Top-line usage is up 12%. Retention is flat; activation dipped…",
+        "We'd love to schedule 30 minutes to discuss your current tooling…",
+        "This week: 16 merges, 2 hotfixes, 0 regressions. Please read…",
+        "A friendly nudge that your security review is due Friday. It…",
+        "Spend is trending 8% down week over week due to improved cache…"
+    ]
+    LABELS = ["Work", "Docs", "Billing", "Follow-up", "Personal", "Newsletters", "Release"]
+    now = datetime.datetime.now()
+    emails = []
+    for _ in range(n):
+        sender = random.choice(SENDERS)
+        subject = random.choice(SUBJECTS)
+        snippet = random.choice(SNIPPETS)
+        unread = random.random() < 0.45
+        starred = random.random() < 0.20
+        lbls = random.sample(LABELS, k=random.randint(0, 2))
+        dt = now - datetime.timedelta(minutes=random.randint(5, 60 * 24 * 14))
+        if (now - dt).days == 0:
+            time_label = dt.strftime("%I:%M %p").lstrip("0")
+        else:
+            time_label = dt.strftime("%b %d")
+        emails.append({
+            "sender": sender,
+            "subject": subject,
+            "snippet": snippet,
+            "time": time_label,
+            "unread": unread,
+            "starred": starred,
+            "labels": lbls
+        })
+    return emails
+
+
+def _draw_inbox_list(surface, x, y, w, h, emails, scroll_y):
+    pygame.draw.rect(surface, (255, 255, 255), (x, y, w, h))
+    row_h = 72
+    start_i = max(0, int((-scroll_y) // row_h) - 2)
+    end_i = min(len(emails), start_i + h // row_h + 4)
+    for i in range(start_i, end_i):
+        ry = y + int(scroll_y) + i * row_h
+        rect = pygame.Rect(x, ry, w, row_h)
+        if emails[i]["unread"]:
+            pygame.draw.rect(surface, (244, 248, 255), rect)
+        else:
+            pygame.draw.rect(surface, (255, 255, 255), rect)
+        pygame.draw.line(surface, (233, 237, 241), (rect.x, rect.bottom), (rect.right, rect.bottom), 1)
+        # sender
+        f_sender = pygame.font.SysFont('arial', 16, bold=emails[i]["unread"])
+        surface.blit(f_sender.render(emails[i]["sender"], True, (33, 37, 41)), (rect.x + 70, rect.y + 10))
+        # subject + snippet
+        subj_font = pygame.font.SysFont('arial', 16, bold=emails[i]["unread"])
+        snip_font = pygame.font.SysFont('arial', 16)
+        subj = emails[i]["subject"]
+        snip = emails[i]["snippet"]
+        subj_img = subj_font.render(subj, True, (33, 37, 41))
+        sep_img = snip_font.render(" — ", True, (107, 114, 128))
+        snp_img = snip_font.render(snip, True, (107, 114, 128))
+        mx = rect.x + 70 + 200 + 10
+        my = rect.y + 10
+        # truncate to fit
+        maxw = w - (mx - x) - 90
+        sj = subj
+        sj_img = subj_img
+        while sj_img.get_width() > maxw and len(sj) > 1:
+            sj = sj[:-2] + "…"
+            sj_img = subj_font.render(sj, True, (33, 37, 41))
+        surface.blit(sj_img, (mx, my))
+        sx = mx + sj_img.get_width()
+        if sx + sep_img.get_width() < x + w - 90:
+            surface.blit(sep_img, (sx, my))
+            sx += sep_img.get_width()
+        remain = (x + w - 90) - sx
+        if remain > 0:
+            sn = snip
+            sn_img = snip_font.render(sn, True, (107, 114, 128))
+            while sn_img.get_width() > remain and len(sn) > 1:
+                sn = sn[:-2] + "…"
+                sn_img = snip_font.render(sn, True, (107, 114, 128))
+            surface.blit(sn_img, (sx, my))
+        # time
+        timg = pygame.font.SysFont('arial', 14).render(emails[i]["time"], True, (107, 114, 128))
+        surface.blit(timg, (x + w - 12 - timg.get_width(), my + 2))
+    page_bottom = y + scroll_y + len(emails) * row_h
+    return page_bottom - y
+
+
+def email_fallback_main():
+    pygame.init()
+    WINDOW_WIDTH, WINDOW_HEIGHT = 1200, 800
+    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+    pygame.display.set_caption("Mail — Embedded Inbox (Fallback)")
+    clock = pygame.time.Clock()
+
+    print("=" * 50)
+    print("EMBEDDED INBOX (FALLBACK)")
+    print("Works with LEFT or RIGHT hand")
+    print("Pinch-drag to scroll • Three-finger rotate to zoom • A-OK to quit")
+    print("=" * 50)
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("ERROR: Could not open camera!")
+        return
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    hands = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.5, min_tracking_confidence=0.5, model_complexity=0)
+
+    # state
+    scroll_y = 0.0
+    smooth_scroll_y = 0.0
+    scroll_gain = 4.0
+    is_pinching = False
+    last_pinch_y = None
+    pinch_threshold = 0.08
+    ok_prev = False
+    ok_touch_threshold = 0.025
+    wheel_active = False
+    wheel_angle = 0.0
+    last_finger_angle = None
+    zoom_level = 1.0
+    zoom_min, zoom_max = 0.5, 2.0
+    zoom_sense = 0.15
+    active_hand_label = None
+
+    emails = _make_fake_emails(80)
+    page_height = 3000
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                running = False
+
+        ret, frame = cap.read()
+        if not ret:
+            pygame.display.flip()
+            clock.tick(60)
+            continue
+
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb)
+
+        # Get active hand
+        active_hand, hand_label = get_active_hand(results)
+        if hand_label != active_hand_label:
+            if hand_label:
+                print(f"🖐️  Email: Switched to {hand_label} hand")
+            active_hand_label = hand_label
+
+        # gestures
+        if active_hand and detect_three_finger_gesture(active_hand):
+            if not wheel_active:
+                wheel_active = True
+                last_finger_angle = None
+            ang = calculate_finger_angle(active_hand)
+            if last_finger_angle is not None:
+                diff = ang - last_finger_angle
+                if diff > math.pi:
+                    diff -= 2 * math.pi
+                elif diff < -math.pi:
+                    diff += 2 * math.pi
+                wheel_angle = (wheel_angle + diff * 2) % (2 * math.pi)
+                zoom_level = clamp(zoom_level + diff * zoom_sense, zoom_min, zoom_max)
+            last_finger_angle = ang
+        else:
+            wheel_active = False
+            last_finger_angle = None
+
+        ok_now = detect_ok_gesture(active_hand, ok_touch_threshold) if active_hand else False
+        if ok_now and not ok_prev:
+            print("A-OK — closing inbox fallback.")
+            running = False
+        ok_prev = ok_now
+
+        if active_hand and not wheel_active:
+            pinch_now = is_pinching(active_hand, pinch_threshold)
+            pos = get_pinch_position(active_hand)
+            if pinch_now and pos:
+                py = pos[1] * WINDOW_HEIGHT
+                if is_pinching and last_pinch_y is not None:
+                    dy = (py - last_pinch_y) * scroll_gain
+                    scroll_y += dy
+                    max_scroll_y = max(0, page_height - (WINDOW_HEIGHT - 80))
+                    scroll_y = clamp(scroll_y, -max_scroll_y, 0)
+                last_pinch_y = py
+                is_pinching = True
+            else:
+                is_pinching = False
+                last_pinch_y = None
+        else:
+            is_pinching = False
+            last_pinch_y = None
+
+        smooth_scroll_y += (scroll_y - smooth_scroll_y) * 0.35
+
+        # draw
+        screen.fill((240, 242, 245))
+        # top bar
+        pygame.draw.rect(screen, (255, 255, 255), (0, 0, WINDOW_WIDTH, 72))
+        pygame.draw.rect(screen, (245, 247, 250), (12, 12, 220, 48), border_radius=12)
+        pygame.draw.rect(screen, (245, 247, 250), (244, 20, WINDOW_WIDTH - 244 - 20, 32), border_radius=16)
+
+        content_x = 220
+        content_y = 80
+        content_w = WINDOW_WIDTH - content_x
+        content_h = WINDOW_HEIGHT - content_y
+
+        # sidebar
+        pygame.draw.rect(screen, (248, 249, 250), (0, content_y, 220, content_h))
+        pygame.draw.rect(screen, (215, 227, 252), (16, content_y + 16, 188, 44), border_radius=22)
+        sidebar_font = pygame.font.SysFont('arial', 18, bold=True)
+        screen.blit(sidebar_font.render("Compose", True, (30, 64, 175)), (58, content_y + 27))
+        pygame.draw.line(screen, (230, 232, 235), (220, content_y), (220, WINDOW_HEIGHT), 1)
+
+        # list area
+        s = zoom_level
+        if abs(s - 1.0) > 0.001:
+            zw = int(content_w * s)
+            zh = int(content_h * s)
+            zoom_surf = pygame.Surface((zw, zh), pygame.SRCALPHA).convert_alpha()
+            zoom_surf.fill((255, 255, 255, 255))
+            ph = _draw_inbox_list(zoom_surf, 0, 0, zw, zh, emails, smooth_scroll_y * s)
+            scaled = pygame.transform.smoothscale(zoom_surf, (content_w, content_h)).convert_alpha()
+            screen.blit(scaled, (content_x, content_y))
+            page_height = int(ph / s)
+        else:
+            ph = _draw_inbox_list(screen, content_x, content_y, content_w, content_h, emails, smooth_scroll_y)
+            page_height = ph
+
+        # status
+        font = pygame.font.SysFont('arial', 16, bold=True)
+        hand_indicator = f"[{active_hand_label} hand]" if active_hand_label else ""
+        status = f"Zoom {zoom_level:.2f}x • Scroll {int(-smooth_scroll_y)}/{max(0, page_height - (WINDOW_HEIGHT - 80))} {hand_indicator}"
+        screen.blit(font.render(status, True, (90, 98, 110)), (16, WINDOW_HEIGHT - 28))
+
+        pygame.display.flip()
+        clock.tick(60)
+
+    cap.release()
+    pygame.quit()
+    sys.exit()
+
+
+# ==============================
+# Entrypoint
+# ==============================
 if __name__ == "__main__":
-    main()
+    if "--email-fallback" in sys.argv:
+        email_fallback_main()
+    else:
+        carousel_main()
