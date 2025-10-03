@@ -6,11 +6,12 @@ Press 'q' to quit, 's' to save screenshot, 'h' to toggle help overlay.
 
 import cv2
 import mediapipe as mp
+import numpy as np
 import time
 import os
 
 class HandTracker:
-    def __init__(self, max_hands=2, detection_confidence=0.5, tracking_confidence=0.5):
+    def __init__(self, max_hands=2, detection_confidence=0.6, tracking_confidence=0.6):
         """Initialize hand tracker with MediaPipe"""
         self.mp_hands = mp.solutions.hands
         self.mp_drawing = mp.solutions.drawing_utils
@@ -104,14 +105,20 @@ class HandTracker:
         """Process frame and detect hands"""
         process_start = time.time()
         
-        # Flip for mirror view
+        # Flip frame for mirror view
         frame = cv2.flip(frame, 1)
+        
+        # Get frame dimensions
+        h, w = frame.shape[:2]
         
         # Convert to RGB for MediaPipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
         # Process the frame
         results = self.hands.process(rgb_frame)
+        
+        # Create blank black frame for display
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
         
         hand_count = 0
         
@@ -132,7 +139,6 @@ class HandTracker:
                 # Get thumb and index finger positions
                 thumb_tip = hand_landmarks.landmark[4]
                 index_tip = hand_landmarks.landmark[8]
-                h, w, _ = frame.shape
                 
                 thumb_pos = (int(thumb_tip.x * w), int(thumb_tip.y * h))
                 index_pos = (int(index_tip.x * w), int(index_tip.y * h))
@@ -196,10 +202,10 @@ class HandTracker:
         """Run the hand tracking application"""
         cap = cv2.VideoCapture(camera_id)
         
-        # Keep camera at lower resolution for performance
+        # Balance resolution for performance and tracking
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_FPS, 60)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
         if not cap.isOpened():
@@ -213,6 +219,7 @@ class HandTracker:
         print(f"Camera: {width}x{height} @ {actual_fps} FPS")
         print(f"Display: {display_width}x{display_height}")
         print(f"Model Complexity: 0 (fastest)")
+        print(f"Detection Confidence: 0.6 | Tracking Confidence: 0.6")
         
         # Create named window with fixed size
         cv2.namedWindow('MediaPipe Hand Tracking', cv2.WINDOW_NORMAL)
@@ -266,8 +273,8 @@ def main():
     # Create hand tracker with custom settings
     tracker = HandTracker(
         max_hands=2,
-        detection_confidence=0.5,
-        tracking_confidence=0.5
+        detection_confidence=0.6,
+        tracking_confidence=0.6
     )
     
     # Run the tracker
