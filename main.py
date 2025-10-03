@@ -85,6 +85,21 @@ class HandTracker:
         
         return positions
     
+    def calculate_distance(self, point1, point2):
+        """Calculate Euclidean distance between two landmarks"""
+        return ((point1.x - point2.x) ** 2 + 
+                (point1.y - point2.y) ** 2 + 
+                (point1.z - point2.z) ** 2) ** 0.5
+    
+    def detect_pinch(self, hand_landmarks, threshold=0.05):
+        """Detect pinch gesture between thumb and index finger"""
+        thumb_tip = hand_landmarks.landmark[4]
+        index_tip = hand_landmarks.landmark[8]
+        
+        distance = self.calculate_distance(thumb_tip, index_tip)
+        
+        return distance < threshold, distance
+    
     def process_frame(self, frame):
         """Process frame and detect hands"""
         process_start = time.time()
@@ -114,18 +129,49 @@ class HandTracker:
                     self.mp_drawing_styles.get_default_hand_connections_style()
                 )
                 
+                # Get thumb and index finger positions
+                thumb_tip = hand_landmarks.landmark[4]
+                index_tip = hand_landmarks.landmark[8]
+                h, w, _ = frame.shape
+                
+                thumb_pos = (int(thumb_tip.x * w), int(thumb_tip.y * h))
+                index_pos = (int(index_tip.x * w), int(index_tip.y * h))
+                
+                # Calculate distance between thumb and index positions (in pixels)
+                pixel_distance = ((thumb_pos[0] - index_pos[0]) ** 2 + 
+                                (thumb_pos[1] - index_pos[1]) ** 2) ** 0.5
+                
+                # Circles touch when distance <= sum of radii (15 + 15 = 30)
+                circles_touching = pixel_distance <= 30
+                
                 # Get hand label (Left/Right)
+                handedness = "Unknown"
                 if results.multi_handedness:
                     handedness = results.multi_handedness[idx].classification[0].label
                     
                     # Get wrist position for label
                     wrist = hand_landmarks.landmark[0]
-                    h, w, _ = frame.shape
                     cx, cy = int(wrist.x * w), int(wrist.y * h)
                     
                     # Draw hand label
-                    cv2.putText(frame, handedness, (cx - 30, cy - 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    label_color = (0, 255, 0) if circles_touching else (255, 0, 255)
+                    label_text = f"{handedness} {'PINCH!' if circles_touching else ''}"
+                    cv2.putText(frame, label_text, (cx - 30, cy - 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, label_color, 2)
+                
+                # Draw tracking circles on thumb and index finger
+                cv2.circle(frame, thumb_pos, 15, (255, 0, 255), 2)  # Magenta circle on thumb
+                cv2.circle(frame, index_pos, 15, (255, 255, 0), 2)  # Cyan circle on index
+                
+                # Draw pinch line - green if circles touching, red otherwise
+                line_color = (0, 255, 0) if circles_touching else (0, 0, 255)
+                cv2.line(frame, thumb_pos, index_pos, line_color, 2)
+                
+                # Draw circle at midpoint if circles are touching
+                if circles_touching:
+                    mid_x = (thumb_pos[0] + index_pos[0]) // 2
+                    mid_y = (thumb_pos[1] + index_pos[1]) // 2
+                    cv2.circle(frame, (mid_x, mid_y), 10, (0, 255, 0), -1)
         
         # Store process time
         self.process_time = time.time() - process_start
@@ -146,11 +192,11 @@ class HandTracker:
         print(f"Screenshot saved: {filename}")
         return filename
     
-    def run(self, camera_id=0):
+    def run(self, camera_id=0, display_width=960, display_height=720):
         """Run the hand tracking application"""
         cap = cv2.VideoCapture(camera_id)
         
-        # Try to set optimal camera settings
+        # Keep camera at lower resolution for performance
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         cap.set(cv2.CAP_PROP_FPS, 30)
@@ -164,8 +210,13 @@ class HandTracker:
         actual_fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"Camera: {width}x{height} @ {actual_fps} FPS (requested)")
+        print(f"Camera: {width}x{height} @ {actual_fps} FPS")
+        print(f"Display: {display_width}x{display_height}")
         print(f"Model Complexity: 0 (fastest)")
+        
+        # Create named window with fixed size
+        cv2.namedWindow('MediaPipe Hand Tracking', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('MediaPipe Hand Tracking', display_width, display_height)
         
         print("\nHand Tracking Started!")
         print("Press 'Q' to quit, 'S' to save screenshot, 'H' to toggle help")
