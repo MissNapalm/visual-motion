@@ -1,285 +1,229 @@
+
 """
-MediaPipe Hand Tracking Application
-Tracks hands in real-time using webcam and displays landmarks with connections.
-Press 'q' to quit, 's' to save screenshot, 'h' to toggle help overlay.
+hand_tracker_tasks.py
+Ultra-stable fingertip bubbles (thumb & index) for both hands using MediaPipe **Tasks** HandLandmarker.
+- One Euro filter per fingertip (sticky when still, responsive when moving)
+- Auto-downloads the .task model if missing
+- Apple Silicon–friendly (no old calculator graph crashes)
+
+Run:
+  python hand_tracker_tasks.py
+Press 'q' to quit.
 """
 
-import cv2
-import mediapipe as mp
-import numpy as np
-import time
 import os
+import time
+import cv2
+import numpy as np
+from collections import defaultdict
+from pathlib import Path
+from urllib.request import urlretrieve
 
-class HandTracker:
-    def __init__(self, max_hands=2, detection_confidence=0.6, tracking_confidence=0.6):
-        """Initialize hand tracker with MediaPipe"""
-        self.mp_hands = mp.solutions.hands
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
-        
-        self.hands = self.mp_hands.Hands(
-            model_complexity=0,
-            min_detection_confidence=detection_confidence,
-            min_tracking_confidence=tracking_confidence,
-            max_num_hands=max_hands,
-            static_image_mode=False
-        )
-        
-        self.fps = 0
-        self.prev_time = 0
-        self.show_help = True
-        self.fps_history = []
-        self.fps_window = 10
-        self.process_time = 0
-        self.capture_time = 0
-        
-    def calculate_fps(self):
-        """Calculate frames per second with smoothing"""
-        curr_time = time.time()
-        fps = 1 / (curr_time - self.prev_time) if self.prev_time > 0 else 0
-        self.prev_time = curr_time
-        
-        # Smooth FPS with moving average
-        self.fps_history.append(fps)
-        if len(self.fps_history) > self.fps_window:
-            self.fps_history.pop(0)
-        
-        self.fps = sum(self.fps_history) / len(self.fps_history)
-        return self.fps
-    
-    def draw_info_overlay(self, frame, hand_count):
-        """Draw information overlay on frame"""
-        height, width = frame.shape[:2]
-        
-        # Semi-transparent background for info
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (10, 10), (350, 160), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        
-        # Display information
-        cv2.putText(frame, f'Hands Detected: {hand_count}', (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f'FPS: {int(self.fps)}', (20, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(frame, f'Capture: {int(self.capture_time * 1000)}ms', (20, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 128, 0), 1)
-        cv2.putText(frame, f'Process: {int(self.process_time * 1000)}ms', (20, 130),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 128, 0), 1)
-        
-        # Help overlay
-        if self.show_help:
-            help_y = height - 120
-            cv2.rectangle(frame, (10, help_y - 10), (350, height - 10), (0, 0, 0), -1)
-            cv2.putText(frame, "Controls:", (20, help_y + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            cv2.putText(frame, "Q - Quit  |  S - Screenshot  |  H - Toggle Help", 
-                        (20, help_y + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-    
-    def get_finger_positions(self, hand_landmarks):
-        """Get fingertip positions (landmarks 4, 8, 12, 16, 20)"""
-        finger_tips = [4, 8, 12, 16, 20]  # Thumb, Index, Middle, Ring, Pinky
-        positions = []
-        
-        for tip_id in finger_tips:
-            landmark = hand_landmarks.landmark[tip_id]
-            positions.append((landmark.x, landmark.y, landmark.z))
-        
-        return positions
-    
-    def calculate_distance(self, point1, point2):
-        """Calculate Euclidean distance between two landmarks"""
-        return ((point1.x - point2.x) ** 2 + 
-                (point1.y - point2.y) ** 2 + 
-                (point1.z - point2.z) ** 2) ** 0.5
-    
-    def detect_pinch(self, hand_landmarks, threshold=0.05):
-        """Detect pinch gesture between thumb and index finger"""
-        thumb_tip = hand_landmarks.landmark[4]
-        index_tip = hand_landmarks.landmark[8]
-        
-        distance = self.calculate_distance(thumb_tip, index_tip)
-        
-        return distance < threshold, distance
-    
-    def process_frame(self, frame):
-        """Process frame and detect hands"""
-        process_start = time.time()
-        
-        # Flip frame for mirror view
-        frame = cv2.flip(frame, 1)
-        
-        # Get frame dimensions
-        h, w = frame.shape[:2]
-        
-        # Convert to RGB for MediaPipe
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Process the frame
-        results = self.hands.process(rgb_frame)
-        
-        # Create blank black frame for display
-        frame = np.zeros((h, w, 3), dtype=np.uint8)
-        
-        hand_count = 0
-        
-        # Draw hand landmarks
-        if results.multi_hand_landmarks:
-            hand_count = len(results.multi_hand_landmarks)
-            
-            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                # Draw landmarks and connections
-                self.mp_drawing.draw_landmarks(
-                    frame,
-                    hand_landmarks,
-                    self.mp_hands.HAND_CONNECTIONS,
-                    self.mp_drawing_styles.get_default_hand_landmarks_style(),
-                    self.mp_drawing_styles.get_default_hand_connections_style()
-                )
-                
-                # Get thumb and index finger positions
-                thumb_tip = hand_landmarks.landmark[4]
-                index_tip = hand_landmarks.landmark[8]
-                
-                thumb_pos = (int(thumb_tip.x * w), int(thumb_tip.y * h))
-                index_pos = (int(index_tip.x * w), int(index_tip.y * h))
-                
-                # Calculate distance between thumb and index positions (in pixels)
-                pixel_distance = ((thumb_pos[0] - index_pos[0]) ** 2 + 
-                                (thumb_pos[1] - index_pos[1]) ** 2) ** 0.5
-                
-                # Circles touch when distance <= sum of radii (15 + 15 = 30)
-                circles_touching = pixel_distance <= 30
-                
-                # Get hand label (Left/Right)
-                handedness = "Unknown"
-                if results.multi_handedness:
-                    handedness = results.multi_handedness[idx].classification[0].label
-                    
-                    # Get wrist position for label
-                    wrist = hand_landmarks.landmark[0]
-                    cx, cy = int(wrist.x * w), int(wrist.y * h)
-                    
-                    # Draw hand label
-                    label_color = (0, 255, 0) if circles_touching else (255, 0, 255)
-                    label_text = f"{handedness} {'PINCH!' if circles_touching else ''}"
-                    cv2.putText(frame, label_text, (cx - 30, cy - 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, label_color, 2)
-                
-                # Draw tracking circles on thumb and index finger
-                cv2.circle(frame, thumb_pos, 15, (255, 0, 255), 2)  # Magenta circle on thumb
-                cv2.circle(frame, index_pos, 15, (255, 255, 0), 2)  # Cyan circle on index
-                
-                # Draw pinch line - green if circles touching, red otherwise
-                line_color = (0, 255, 0) if circles_touching else (0, 0, 255)
-                cv2.line(frame, thumb_pos, index_pos, line_color, 2)
-                
-                # Draw circle at midpoint if circles are touching
-                if circles_touching:
-                    mid_x = (thumb_pos[0] + index_pos[0]) // 2
-                    mid_y = (thumb_pos[1] + index_pos[1]) // 2
-                    cv2.circle(frame, (mid_x, mid_y), 10, (0, 255, 0), -1)
-        
-        # Store process time
-        self.process_time = time.time() - process_start
-        
-        # Calculate FPS
-        self.calculate_fps()
-        
-        # Draw overlay
-        self.draw_info_overlay(frame, hand_count)
-        
-        return frame
-    
-    def save_screenshot(self, frame):
-        """Save current frame as screenshot"""
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"hand_tracking_{timestamp}.png"
-        cv2.imwrite(filename, frame)
-        print(f"Screenshot saved: {filename}")
-        return filename
-    
-    def run(self, camera_id=0, display_width=960, display_height=720):
-        """Run the hand tracking application"""
-        cap = cv2.VideoCapture(camera_id)
-        
-        # Balance resolution for performance and tracking
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 60)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
-        if not cap.isOpened():
-            print("Error: Could not open camera")
-            return
-        
-        # Print camera info
-        actual_fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"Camera: {width}x{height} @ {actual_fps} FPS")
-        print(f"Display: {display_width}x{display_height}")
-        print(f"Model Complexity: 0 (fastest)")
-        print(f"Detection Confidence: 0.6 | Tracking Confidence: 0.6")
-        
-        # Create named window with fixed size
-        cv2.namedWindow('MediaPipe Hand Tracking', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('MediaPipe Hand Tracking', display_width, display_height)
-        
-        print("\nHand Tracking Started!")
-        print("Press 'Q' to quit, 'S' to save screenshot, 'H' to toggle help")
-        print("\nWatch the timing diagnostics:")
-        print("- Capture time = time to grab frame from camera")
-        print("- Process time = MediaPipe processing time\n")
-        
-        while cap.isOpened():
-            capture_start = time.time()
-            success, frame = cap.read()
-            self.capture_time = time.time() - capture_start
-            
-            if not success:
+# ---- Optional: force CPU if your Metal/GL stack is quirky ----
+# os.environ["MEDIAPIPE_USE_GPU"] = "0"
+
+# ---- MediaPipe Tasks imports ----
+import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
+
+# ========== Model bootstrap ==========
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+    "hand_landmarker/float16/1/hand_landmarker.task"
+)
+MODEL_DIR = Path.home() / ".mediapipe_models"
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_PATH = MODEL_DIR / "hand_landmarker.task"
+
+def ensure_model():
+    if not MODEL_PATH.exists():
+        print(f"[setup] Downloading model to {MODEL_PATH} ...")
+        urlretrieve(MODEL_URL, MODEL_PATH)
+        print("[setup] Model downloaded.")
+    return str(MODEL_PATH)
+
+# ========== One Euro Filter ==========
+class OneEuroFilter:
+    def __init__(self, freq=60.0, min_cutoff=1.2, beta=0.03, dcutoff=1.0):
+        self.freq = float(freq)
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.dcutoff = float(dcutoff)
+        self.t_prev = None
+        self.x_prev = None
+        self.dx_prev = None
+
+    @staticmethod
+    def _alpha(cutoff, freq):
+        tau = 1.0 / (2.0 * np.pi * cutoff)
+        te  = 1.0 / max(freq, 1e-6)
+        return 1.0 / (1.0 + tau / te)
+
+    def __call__(self, x, t_now):
+        x = x.astype(np.float32)
+        if self.t_prev is None:
+            self.t_prev = t_now
+            self.x_prev = x
+            self.dx_prev = np.zeros_like(x)
+            return x
+
+        dt = max(t_now - self.t_prev, 1e-6)
+        self.freq = 1.0 / dt
+        self.t_prev = t_now
+
+        dx = (x - self.x_prev) * self.freq
+        a_d = self._alpha(self.dcutoff, self.freq)
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+
+        cutoff = self.min_cutoff + self.beta * float(np.linalg.norm(dx_hat))
+        a = self._alpha(cutoff, self.freq)
+        x_hat = a * x + (1.0 - a) * self.x_prev
+
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        return x_hat
+
+# ========== Drawing helpers ==========
+def draw_labelled_bubble(img, center_xy, radius, fill_bgr, text):
+    cx, cy = int(round(center_xy[0])), int(round(center_xy[1]))
+    cv2.circle(img, (cx, cy), radius, fill_bgr, -1, lineType=cv2.LINE_AA)
+    cv2.circle(img, (cx, cy), radius+2, (255,255,255), 2, lineType=cv2.LINE_AA)
+    pos = (cx - radius - 6, cy - radius - 8)
+    cv2.putText(img, text, (pos[0]+1, pos[1]+1),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,0,0), 2, cv2.LINE_AA)
+    cv2.putText(img, text, pos,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+
+# ========== Setup HandLandmarker (Tasks API) ==========
+def create_hand_landmarker():
+    model_path = ensure_model()
+    base_options = mp_python.BaseOptions(model_asset_path=model_path)
+    options = mp_vision.HandLandmarkerOptions(
+        base_options=base_options,
+        num_hands=2,
+        min_hand_detection_confidence=0.75,
+        min_hand_presence_confidence=0.55,
+        running_mode=mp_vision.RunningMode.VIDEO,
+    )
+    return mp_vision.HandLandmarker.create_from_options(options)
+
+# ========== Main ==========
+def main():
+    detector = create_hand_landmarker()
+
+    # macOS best backend; harmless elsewhere. Try AVFOUNDATION then default.
+    cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(0)
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 60)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    print("Hand Tracking Started! Press 'q' to quit.")
+    print("Ultra-stable thumb & index bubbles per hand (Tasks API).")
+
+    # Filters per (hand_index, "thumb"/"index")
+    filters = defaultdict(lambda: OneEuroFilter(freq=60.0, min_cutoff=1.2, beta=0.03, dcutoff=1.0))
+    last_seen = {}
+    STALE_RESET_S = 0.4
+
+    # landmark indices
+    LID_THUMB_TIP = 4
+    LID_INDEX_TIP = 8
+
+    # Colors per hand label
+    COLORS = {
+        "Left":  ((255,   0,   0), (255, 120,   0)),  # thumb, index
+        "Right": ((  0,   0, 255), (  0, 120, 255)),
+    }
+
+    def handed_label(handedness_list):
+        # Each is a list of Category; pick the top one.
+        if not handedness_list:
+            return "Right"
+        name = handedness_list[0].category_name
+        return "Left" if name.lower().startswith("left") else "Right"
+
+    prev_ts_ms = 0
+
+    try:
+        while True:
+            ok, frame_bgr = cap.read()
+            if not ok:
                 print("Failed to capture frame")
                 break
-            
-            # Process the frame
-            processed_frame = self.process_frame(frame)
-            
-            # Display the result
-            cv2.imshow('MediaPipe Hand Tracking', processed_frame)
-            
-            # Handle key presses
-            key = cv2.waitKey(1) & 0xFF
-            
-            if key == ord('q') or key == ord('Q'):
-                print("Exiting...")
+
+            frame_bgr = cv2.flip(frame_bgr, 1)
+            h, w = frame_bgr.shape[:2]
+
+            # Build MediaPipe Image with monotonic timestamp
+            ts_ms = int(time.time() * 1000)
+            if ts_ms <= prev_ts_ms:
+                ts_ms = prev_ts_ms + 1
+            prev_ts_ms = ts_ms
+
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
+                                data=cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+
+            result = detector.detect_for_video(mp_image, ts_ms)
+
+            # Draw minimal skeleton (for context)
+            if result.hand_landmarks:
+                for lms in result.hand_landmarks:
+                    P = [(int(l.x * w), int(l.y * h)) for l in lms]
+                    def seg(a, b):
+                        cv2.line(frame_bgr, P[a], P[b], (180, 180, 180), 2, cv2.LINE_AA)
+                    # minimal hand mesh
+                    for a,b in [(0,1),(1,2),(2,3),(3,4),
+                                (5,6),(6,7),(7,8),
+                                (9,10),(10,11),(11,12),
+                                (13,14),(14,15),(15,16),
+                                (17,18),(18,19),(19,20),
+                                (0,5),(5,9),(9,13),(13,17)]:
+                        seg(a,b)
+
+                # Bubbles with filtering
+                for hi, (lms, handedness) in enumerate(zip(result.hand_landmarks, result.handedness)):
+                    label = handed_label(handedness)
+
+                    thumb = lms[LID_THUMB_TIP]
+                    index = lms[LID_INDEX_TIP]
+
+                    thumb_px = np.array([thumb.x * w, thumb.y * h], dtype=np.float32)
+                    index_px = np.array([index.x * w, index.y * h], dtype=np.float32)
+
+                    t_now = time.perf_counter()
+
+                    # Reset filters if stale (prevents teleport on occlusion)
+                    for name, pt in (("thumb", thumb_px), ("index", index_px)):
+                        key = (hi, name)
+                        last_t = last_seen.get(key)
+                        if last_t is None or (t_now - last_t) > STALE_RESET_S:
+                            filters[key] = OneEuroFilter(freq=60.0, min_cutoff=1.2, beta=0.03, dcutoff=1.0)
+                        last_seen[key] = t_now
+
+                    thumb_s = filters[(hi, "thumb")](thumb_px, t_now)
+                    index_s = filters[(hi, "index")](index_px, t_now)
+
+                    thumb_color, index_color = COLORS.get(label, ((80,80,255),(80,255,80)))
+                    draw_labelled_bubble(frame_bgr, thumb_s, 20, thumb_color, f"{label} Thumb")
+                    draw_labelled_bubble(frame_bgr, index_s, 20, index_color, f"{label} Index")
+
+            cv2.putText(frame_bgr, "Press 'Q' to quit", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 240, 90), 2, cv2.LINE_AA)
+            cv2.imshow("Hand Tracking (Tasks API) - Ultra Stable Bubbles", frame_bgr)
+
+            if (cv2.waitKey(1) & 0xFF) == ord('q'):
+                print("Exiting…")
                 break
-            elif key == ord('s') or key == ord('S'):
-                self.save_screenshot(processed_frame)
-            elif key == ord('h') or key == ord('H'):
-                self.show_help = not self.show_help
-        
-        # Cleanup
+    finally:
         cap.release()
         cv2.destroyAllWindows()
-        print("Hand tracking stopped.")
-    
-    def __del__(self):
-        """Cleanup on deletion"""
-        if hasattr(self, 'hands'):
-            self.hands.close()
-
-
-def main():
-    """Main function to run hand tracker"""
-    # Create hand tracker with custom settings
-    tracker = HandTracker(
-        max_hands=2,
-        detection_confidence=0.6,
-        tracking_confidence=0.6
-    )
-    
-    # Run the tracker
-    tracker.run(camera_id=0)
-
+        # detector doesn't need explicit close
 
 if __name__ == "__main__":
     main()
+
