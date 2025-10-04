@@ -1,14 +1,11 @@
 """
 hand_tracker_tasks_autotune.py
-Auto-tuned, high-FPS hand tracking with ultra-stable fingertip bubbles (thumb & index).
-+ Pinch detection with hysteresis (bubbles flash red + label when pinched)
+Auto-tuned, high-FPS hand tracking with ultra-stable fingertip bubbles (thumb & index)
++ Midpoint bubble between thumb & index (both hands)
++ Pinch detection with hysteresis (all three bubbles flash red)
++ Skeleton always drawn UNDER bubbles
++ Skeleton is blue with darker blue outline (thin)
 
-- MediaPipe Tasks HandLandmarker (Apple Silicon–friendly)
-- One Euro smoothing
-- Camera auto-probe (FPS x resolution)
-- Zero-latency capture thread (keeps newest frame)
-- Processing downscale + auto-downshift when proc FPS lags
-- Toggle skeleton drawing, choose num_hands
 Press 'q' to quit.
 """
 
@@ -25,29 +22,38 @@ from urllib.request import urlretrieve
 # If your GPU/Metal stack is flaky, uncomment to force CPU:
 # os.environ["MEDIAPIPE_USE_GPU"] = "0"
 
-DRAW_SKELETON = False       # Turn on for debug visuals (slower)
-NUM_HANDS     = 2           # 1 for speed, 2 if you need both
-TARGET_PROC_FPS = 45.0      # If sustained below this, we auto-downshift processing size
+NUM_HANDS        = 2
+TARGET_PROC_FPS  = 45.0
 
 # Candidate camera settings to probe (ordered by desirability)
 CAM_RES = [(1280, 720), (960, 540), (640, 480)]
 CAM_FPS = [120, 60, 30]
 
-# Processing pyramid: we feed a downscaled frame to the model for speed
-PROC_SCALES = [1.0, 0.75, 0.5]  # 1.0 = full capture size, 0.5 = half in each dimension
-PROC_DOWNSHIFT_GRACE_S = 2.0    # time under target before downshifting
+# Processing pyramid
+PROC_SCALES = [1.0, 0.75, 0.5]
+PROC_DOWNSHIFT_GRACE_S = 2.0
 
-# Default window size (bigger than capture)
+# Window
 WINDOW_INIT_W = 1280
 WINDOW_INIT_H = 900
-WINDOW_NAME = "Hand Tracking (Autotune) - Ultra Stable Bubbles"
+WINDOW_NAME   = "Hand Tracking (Autotune) - Ultra Stable Bubbles"
 
 # Pinch hysteresis (as fraction of palm width)
 PINCH_ON_RATIO  = 0.28
 PINCH_OFF_RATIO = 0.35
-# --------------------------------------------
 
-# Limit OpenCV threads to avoid contention (often helps)
+# ---- Visual sizes/colors ----
+BUBBLE_RADIUS_MAIN   = 14   # thumb/index bubble radius
+BUBBLE_RADIUS_MID    = 12   # midpoint bubble radius
+
+# Thin blue skeleton with darker blue outline
+SKELETON_SHADOW_THICK = 6
+SKELETON_LINE_THICK   = 2
+SKELETON_COLOR        = (255, 170, 0)   # light blue (BGR)
+SKELETON_OUTLINE      = (170, 85, 0)    # darker blue (BGR)
+# -----------------------------
+
+# Limit OpenCV threads
 try:
     cv2.setNumThreads(1)
 except Exception:
@@ -63,7 +69,7 @@ MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
     "hand_landmarker/float16/1/hand_landmarker.task"
 )
-MODEL_DIR = Path.home() / ".mediapipe_models"
+MODEL_DIR  = Path.home() / ".mediapipe_models"
 MODEL_PATH = MODEL_DIR / "hand_landmarker.task"
 
 def ensure_model():
@@ -120,27 +126,31 @@ def draw_labelled_bubble(img, center_xy, radius, fill_bgr, text):
     cx, cy = int(round(center_xy[0])), int(round(center_xy[1]))
     cv2.circle(img, (cx, cy), radius, fill_bgr, -1, lineType=cv2.LINE_AA)
     cv2.circle(img, (cx, cy), radius+2, (255,255,255), 2, lineType=cv2.LINE_AA)
-    pos = (cx - radius - 6, cy - radius - 8)
+    pos = (cx - radius - 6), (cy - radius - 8)
     cv2.putText(img, text, (pos[0]+1, pos[1]+1),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,0,0), 2, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
     cv2.putText(img, text, pos,
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 2, cv2.LINE_AA)
 
-def draw_min_skeleton(img, pts):
+def draw_min_skeleton_under(img, pts):
+    """Skeleton UNDER other graphics: darker blue outline + lighter blue line."""
     lines = [(0,1),(1,2),(2,3),(3,4),
              (5,6),(6,7),(7,8),
              (9,10),(10,11),(11,12),
              (13,14),(14,15),(15,16),
              (17,18),(18,19),(19,20),
              (0,5),(5,9),(9,13),(13,17)]
+    # Outline (underlay)
     for a,b in lines:
-        cv2.line(img, pts[a], pts[b], (180,180,180), 2, cv2.LINE_AA)
+        cv2.line(img, pts[a], pts[b], SKELETON_OUTLINE, SKELETON_SHADOW_THICK, cv2.LINE_AA)
+    # Foreground (thin)
+    for a,b in lines:
+        cv2.line(img, pts[a], pts[b], SKELETON_COLOR, SKELETON_LINE_THICK, cv2.LINE_AA)
 
 def draw_pinch_label(img, midpoint_xy, text="Pinch detected"):
     x, y = int(round(midpoint_xy[0])), int(round(midpoint_xy[1]))
-    # Slight shadow for readability
-    cv2.putText(img, text, (x+1, y-21), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 3, cv2.LINE_AA)
-    cv2.putText(img, text, (x,   y-22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2, cv2.LINE_AA)
+    cv2.putText(img, text, (x+1, y-19), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,0,0), 3, cv2.LINE_AA)
+    cv2.putText(img, text, (x,   y-20), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,0,255), 2, cv2.LINE_AA)
 
 # -------------- Capture thread --------------
 class LatestFrameCapture:
@@ -168,15 +178,13 @@ class LatestFrameCapture:
         while not self.stopped:
             ok, frame = self.cap.read()
             if not ok:
-                time.sleep(0.01)
-                continue
+                time.sleep(0.01); continue
             with self.lock:
                 self.frame = frame
 
     def read(self):
         with self.lock:
-            f = None if self.frame is None else self.frame.copy()
-        return f
+            return None if self.frame is None else self.frame.copy()
 
     def release(self):
         self.stopped = True
@@ -196,28 +204,23 @@ def try_cam_settings(cap, w, h, fps, sample_time=0.8):
     while time.time() - start < sample_time:
         ok, frame = cap.read()
         if not ok:
-            time.sleep(0.01)
-            continue
+            time.sleep(0.01); continue
         frames += 1
-    measured = frames / max(time.time() - start, 1e-6)
-    return measured
+    return frames / max(time.time() - start, 1e-6)
 
 def pick_best_camera_combo():
     temp = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
     if not temp.isOpened():
         temp = cv2.VideoCapture(0)
-
-    best = None
-    best_score = -1.0
+    best, best_score = None, -1.0
     for (w, h) in CAM_RES:
         for fps in CAM_FPS:
             meas = try_cam_settings(temp, w, h, fps)
-            score = meas - (w*h)/ (1920*1080*2.0)  # prefer FPS, lightly penalize big res
+            score = meas - (w*h)/(1920*1080*2.0)  # prefer FPS; mildly penalize big res
             if score > best_score:
-                best_score = score
-                best = (w, h, fps, meas)
+                best_score, best = score, (w, h, fps, meas)
     temp.release()
-    return best  # (w,h,fps,measured_fps)
+    return best
 
 # -------------- HandLandmarker setup --------------
 def create_hand_landmarker():
@@ -232,11 +235,13 @@ def create_hand_landmarker():
     )
     return mp_vision.HandLandmarker.create_from_options(options)
 
-def handed_label(handedness_list):
-    if not handedness_list:
+def handed_label_after_mirror(raw_handedness_list):
+    """Swap Left/Right after horizontal flip to match user view."""
+    if not raw_handedness_list:
         return "Right"
-    name = handedness_list[0].category_name
-    return "Left" if name.lower().startswith("left") else "Right"
+    name = raw_handedness_list[0].category_name
+    raw = "Left" if name.lower().startswith("left") else "Right"
+    return "Right" if raw == "Left" else "Left"
 
 # -------------- Main --------------
 def main():
@@ -251,12 +256,12 @@ def main():
 
     detector = create_hand_landmarker()
 
-    # Make the window big by default (resizable)
+    # Big, resizable window
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WINDOW_NAME, WINDOW_INIT_W, WINDOW_INIT_H)
 
     print("Hand Tracking Started! Press 'q' to quit.")
-    print(f"Ultra-stable thumb & index bubbles | num_hands={NUM_HANDS} | skeleton={DRAW_SKELETON}")
+    print("Bubbles over thin blue skeleton; midpoint bubble; pinch detect; corrected handedness.")
 
     # Filters per (hand_index, "thumb"/"index")
     filters = defaultdict(lambda: OneEuroFilter(freq=60.0, min_cutoff=1.2, beta=0.03, dcutoff=1.0))
@@ -264,16 +269,19 @@ def main():
     STALE_RESET_S = 0.4
 
     # Landmarks
-    LID_WRIST      = 0
-    LID_INDEX_MCP  = 5
-    LID_PINKY_MCP  = 17
-    LID_THUMB_TIP  = 4
-    LID_INDEX_TIP  = 8
+    LID_INDEX_MCP = 5
+    LID_PINKY_MCP = 17
+    LID_THUMB_TIP = 4
+    LID_INDEX_TIP = 8
 
     # Colors
     COLORS = {
         "Left":  ((255,   0,   0), (255, 120,   0)),  # thumb, index
         "Right": ((  0,   0, 255), (  0, 120, 255)),
+    }
+    MID_COLORS = {
+        "Left":  (180, 0, 180),
+        "Right": (0, 180, 180),
     }
     RED = (0, 0, 255)
 
@@ -294,15 +302,14 @@ def main():
         while True:
             frame_bgr = cap.read()
             if frame_bgr is None:
-                time.sleep(0.001)
-                continue
+                time.sleep(0.001); continue
 
             # Display FPS
             now_t = time.time()
             disp_fps = 0.9 * disp_fps + 0.1 * (1.0 / max(now_t - prev_disp_time, 1e-6))
             prev_disp_time = now_t
 
-            frame_bgr = cv2.flip(frame_bgr, 1)
+            frame_bgr = cv2.flip(frame_bgr, 1)  # mirror view
             H, W = frame_bgr.shape[:2]
 
             # Downscale for processing
@@ -340,19 +347,19 @@ def main():
 
             # Draw & Pinch detection
             if result.hand_landmarks:
-                # Optional skeleton
-                if DRAW_SKELETON:
-                    for lms in result.hand_landmarks:
-                        P = [(int(l.x * W), int(l.y * H)) for l in lms]
-                        draw_min_skeleton(frame_bgr, P)
+                # --- Skeleton FIRST (under bubbles) ---
+                for lms in result.hand_landmarks:
+                    P = [(int(l.x * W), int(l.y * H)) for l in lms]
+                    draw_min_skeleton_under(frame_bgr, P)
 
+                # --- Then per-hand bubbles & pinch (on top of skeleton) ---
                 for hi, (lms, handedness) in enumerate(zip(result.hand_landmarks, result.handedness)):
-                    label = handed_label(handedness)
+                    label = handed_label_after_mirror(handedness)
 
-                    # Extract points (display space)
                     thumb = lms[LID_THUMB_TIP]; index = lms[LID_INDEX_TIP]
                     index_mcp = lms[LID_INDEX_MCP]; pinky_mcp = lms[LID_PINKY_MCP]
 
+                    # Raw (display-space) points
                     thumb_px = np.array([thumb.x * W, thumb.y * H], dtype=np.float32)
                     index_px = np.array([index.x * W, index.y * H], dtype=np.float32)
                     index_mcp_px = np.array([index_mcp.x * W, index_mcp.y * H], dtype=np.float32)
@@ -369,7 +376,10 @@ def main():
                     thumb_s = filters[(hi, "thumb")](thumb_px, t_now)
                     index_s = filters[(hi, "index")](index_px, t_now)
 
-                    # --- Pinch detection (hysteresis) ---
+                    # Midpoint from smoothed tips
+                    mid_s = (thumb_s + index_s) / 2.0
+
+                    # Pinch detection (hysteresis)
                     palm_width = float(np.linalg.norm(index_mcp_px - pinky_mcp_px)) + 1e-6
                     dist_tips  = float(np.linalg.norm(thumb_s - index_s))
 
@@ -382,17 +392,17 @@ def main():
 
                     # Colors
                     thumb_color, index_color = COLORS.get(label, ((80,80,255),(80,255,80)))
+                    mid_color = MID_COLORS.get(label, (180, 180, 0))
                     if is_on:
-                        thumb_color = index_color = (0, 0, 255)  # bright red
+                        thumb_color = index_color = mid_color = RED
 
-                    # Draw bubbles
-                    draw_labelled_bubble(frame_bgr, thumb_s, 20, thumb_color, f"{label} Thumb")
-                    draw_labelled_bubble(frame_bgr, index_s, 20, index_color, f"{label} Index")
+                    # Draw bubbles + labels
+                    draw_labelled_bubble(frame_bgr, thumb_s, BUBBLE_RADIUS_MAIN, thumb_color, f"{label} Thumb")
+                    draw_labelled_bubble(frame_bgr, index_s, BUBBLE_RADIUS_MAIN, index_color, f"{label} Index")
+                    draw_labelled_bubble(frame_bgr, mid_s,   BUBBLE_RADIUS_MID,  mid_color,   f"{label} Mid")
 
-                    # Pinch label at midpoint
                     if is_on:
-                        midpoint = (thumb_s + index_s) / 2.0
-                        draw_pinch_label(frame_bgr, midpoint, "Pinch detected")
+                        draw_pinch_label(frame_bgr, mid_s, "Pinch detected")
 
             # HUD
             cv2.putText(frame_bgr, f"Cam: {W}x{H} @ ~{disp_fps:.0f} fps", (16, 30),
@@ -404,8 +414,8 @@ def main():
 
             cv2.imshow(WINDOW_NAME, frame_bgr)
             if (cv2.waitKey(1) & 0xFF) == ord('q'):
-                print("Exiting…")
-                break
+                print("Exiting…"); break
+
     finally:
         cap.release()
         cv2.destroyAllWindows()
