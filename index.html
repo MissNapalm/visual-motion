@@ -4,474 +4,253 @@
   <meta charset="UTF-8"/>
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' https: 'unsafe-inline' 'unsafe-eval' blob: data:; media-src * blob: data:; img-src * data: blob:;"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Gesture Browser (Electron)</title>
+  <title>Gesture Browser</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
-    html, body { height:100%; }
-    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#1a1a1a; color:#111; overflow:hidden; }
+    body { font-family:system-ui; background:#1a1a1a; overflow:hidden; }
 
-    .browser-chrome { background:#f0f0f0; border-bottom:1px solid #ccc; display:flex; flex-direction:column; }
-    .window-controls { display:flex; gap:8px; padding:12px; }
-    .control { width:12px; height:12px; border-radius:50%; }
+    /* Browser chrome */
+    .chrome { background:#f0f0f0; border-bottom:1px solid #ccc; }
+    .controls { display:flex; gap:8px; padding:12px; }
+    .dot { width:12px; height:12px; border-radius:50%; }
     .close{background:#ff5f57}.minimize{background:#ffbd2e}.maximize{background:#28ca42}
+    .nav { display:flex; align-items:center; gap:8px; padding:8px 12px; }
+    .btn { width:32px; height:32px; border:none; background:#e0e0e0; border-radius:6px; cursor:pointer; font-size:16px; }
+    .btn:hover{background:#dcdcdc}.btn:active{transform:scale(.96)}
+    .url-wrap{flex:1}
+    .url{width:100%; padding:8px 16px; border:1px solid #ccc; border-radius:20px; font-size:14px; outline:none}
+    .url:focus{border-color:#4285f4}
 
-    .navigation { display:flex; align-items:center; gap:8px; padding:8px 12px; }
-    .nav-btn { width:32px; height:32px; border:none; background:#e0e0e0; border-radius:6px; cursor:pointer; font-size:16px; transition:transform .08s, background .2s; }
-    .nav-btn:hover{background:#dcdcdc}.nav-btn:active{transform:scale(.96)}
-    .address-bar-container{flex:1}
-    .address-bar{width:100%; padding:8px 16px; border:1px solid #ccc; border-radius:20px; font-size:14px; outline:none}
-    .address-bar:focus{border-color:#4285f4}
+    /* Webview */
+    webview{position:absolute; inset:100px 0 0 0; width:100%; height:calc(100vh - 100px); background:#fff; border:none}
 
-    .browser-content{position:relative; height:calc(100vh - 100px)}
-    webview#webview{position:absolute; inset:0; width:100%; height:100%; background:#fff; border:none}
-
-    .camera-overlay{position:fixed; top:100px; right:20px; width:320px; height:240px; background:rgba(0,0,0,.9); border-radius:12px; overflow:hidden; box-shadow:0 8px 32px rgba(0,0,0,.4); z-index:1000}
-    .camera-header{position:absolute; inset:0 0 auto 0; background:rgba(0,0,0,.8); color:#fff; padding:8px 12px; display:flex; justify-content:space-between; align-items:center; font-size:12px; z-index:1001}
-    #toggleCamera{background:none; border:none; cursor:pointer; font-size:16px; color:#fff}
+    /* Camera overlay */
+    .cam{position:fixed; top:100px; right:20px; width:320px; height:240px; background:rgba(0,0,0,.9); border-radius:12px; overflow:hidden; box-shadow:0 8px 32px rgba(0,0,0,.4); z-index:1000}
+    .cam-hdr{position:absolute; top:0; left:0; right:0; background:rgba(0,0,0,.8); color:#fff; padding:8px 12px; display:flex; justify-content:space-between; font-size:12px; z-index:1}
+    .cam-toggle{background:none; border:none; cursor:pointer; font-size:16px; color:#fff}
     #video{width:100%; height:100%; object-fit:cover; transform:scaleX(-1)}
-    #canvas{position:absolute; inset:0; width:100%; height:100%; transform:scaleX(-1)}
+    #canvas{position:absolute; inset:0; transform:scaleX(-1)}
 
-    .gesture-indicator{position:fixed; bottom:20px; left:20px; background:rgba(0,0,0,.8); color:#fff; padding:12px 20px; border-radius:8px; font-size:14px; z-index:1200}
+    /* Status HUD */
+    .hud{position:fixed; bottom:20px; left:20px; background:rgba(0,0,0,.8); color:#fff; padding:12px 20px; border-radius:8px; font-size:14px; z-index:1200}
 
-    /* Crosshairs (always-on, 2 hands) */
-    .crosshair{position:fixed; left:0; top:0; width:28px; height:28px; transform:translate(-50%,-50%); z-index:2000; pointer-events:none; display:none; transition:transform .06s}
-    .crosshair.visible{display:block}
-    .crosshair .ring{position:absolute; inset:0; border:3px solid var(--ch-color); border-radius:9999px; box-shadow:0 0 18px var(--ch-glow), inset 0 0 6px var(--ch-glow); background:var(--ch-bg)}
-    .crosshair .hline,.crosshair .vline{position:absolute; background:var(--ch-color); filter:drop-shadow(0 0 6px var(--ch-glow))}
-    .crosshair .hline{left:-14px; right:-14px; top:50%; height:2px; transform:translateY(-50%)}
-    .crosshair .vline{top:-14px; bottom:-14px; left:50%; width:2px; transform:translateX(-50%)}
-    #crosshair1{--ch-color:#00e5ff; --ch-glow:rgba(0,229,255,.9); --ch-bg:rgba(0,229,255,0.10)}
-    #crosshair2{--ch-color:#ff4bd6; --ch-glow:rgba(255,75,214,.9); --ch-bg:rgba(255,75,214,0.10)}
-    .crosshair.pinch{transform:translate(-50%,-50%) scale(.85)}
-    .crosshair.pulse .ring{animation:chPulse .45s ease-out}
-    @keyframes chPulse{0%{transform:scale(1);opacity:1}100%{transform:scale(1.6);opacity:0}}
+    /* Crosshairs */
+    .cross{position:fixed; width:28px; height:28px; transform:translate(-50%,-50%); z-index:2000; pointer-events:none; display:none; transition:transform .06s}
+    .cross.on{display:block}
+    .cross .ring{position:absolute; inset:0; border:3px solid var(--c); border-radius:50%; box-shadow:0 0 18px var(--g), inset 0 0 6px var(--g); background:var(--bg)}
+    .cross .h,.cross .v{position:absolute; background:var(--c); filter:drop-shadow(0 0 6px var(--g))}
+    .cross .h{left:-14px; right:-14px; top:50%; height:2px; transform:translateY(-50%)}
+    .cross .v{top:-14px; bottom:-14px; left:50%; width:2px; transform:translateX(-50%)}
+    #ch1{--c:#00e5ff; --g:rgba(0,229,255,.9); --bg:rgba(0,229,255,.1)}
+    #ch2{--c:#ff4bd6; --g:rgba(255,75,214,.9); --bg:rgba(255,75,214,.1)}
+    .cross.pinch{transform:translate(-50%,-50%) scale(.85)}
+    .cross.pulse .ring{animation:pulse .45s ease-out}
+    @keyframes pulse{0%{transform:scale(1);opacity:1}100%{transform:scale(1.6);opacity:0}}
 
-    /* Big corner buttons (easy to pinch) */
-    .corner-btn{
-      position:fixed; top:10px; width:120px; height:120px;
-      display:flex; align-items:center; justify-content:center;
-      background:rgba(0,0,0,.35); border:2px solid rgba(255,255,255,.45);
-      color:#fff; font-size:56px; border-radius:16px;
-      backdrop-filter: blur(6px);
-      user-select:none; cursor:pointer; z-index:2500;
-      transition: transform .06s ease, background .2s ease, box-shadow .2s ease;
-    }
-    .corner-btn:hover{ background:rgba(0,0,0,.45); box-shadow:0 8px 28px rgba(0,0,0,.35); }
-    .corner-btn:active, .corner-btn.active{ transform:scale(.96); background:rgba(0,0,0,.55); }
-    #cornerBackBtn{ left:10px; }
-    #cornerFwdBtn{ right:10px; }
+    /* Corner nav buttons */
+    .corner{position:fixed; top:10px; width:120px; height:120px; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.35); border:2px solid rgba(255,255,255,.45); color:#fff; font-size:56px; border-radius:16px; backdrop-filter:blur(6px); cursor:pointer; z-index:2500; transition:transform .06s, background .2s}
+    .corner:hover{background:rgba(0,0,0,.45)}
+    .corner:active,.corner.hit{transform:scale(.96); background:rgba(0,0,0,.55)}
+    #back{left:10px}
+    #fwd{right:10px}
   </style>
 </head>
 <body>
-  <div class="browser-chrome">
-    <div class="window-controls">
-      <div class="control close"></div><div class="control minimize"></div><div class="control maximize"></div>
-    </div>
-    <div class="navigation">
-      <button class="nav-btn" id="backBtn" title="Back">←</button>
-      <button class="nav-btn" id="forwardBtn" title="Forward">→</button>
-      <button class="nav-btn" id="reloadBtn" title="Reload">↻</button>
-      <div class="address-bar-container"><input id="addressBar" class="address-bar" value="https://www.reddit.com" placeholder="Enter URL..."/></div>
-      <button class="nav-btn" id="gestureToggle" title="Toggle Hand Overlay">🎥</button>
+  <div class="chrome">
+    <div class="controls"><div class="dot close"></div><div class="dot minimize"></div><div class="dot maximize"></div></div>
+    <div class="nav">
+      <button class="btn" id="bk">←</button>
+      <button class="btn" id="fw">→</button>
+      <button class="btn" id="rl">↻</button>
+      <div class="url-wrap"><input id="url" class="url" value="https://www.reddit.com"/></div>
+      <button class="btn" id="tog">🎥</button>
     </div>
   </div>
 
-  <div class="browser-content">
-    <!-- Debounced, partitioned webview -->
-    <webview
-      id="webview"
-      src="https://www.reddit.com"
-      allowpopups
-      allow="autoplay; fullscreen *; picture-in-picture *"
-      partition="persist:main"
-      useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-      webpreferences="contextIsolation=yes, nodeIntegration=no"
-      style="position:absolute; inset:0; width:100%; height:100%; background:#fff; border:none"
-    ></webview>
-  </div>
+  <webview id="wv" src="https://www.reddit.com" allowpopups partition="persist:main" webpreferences="contextIsolation=yes, nodeIntegration=no"></webview>
 
-  <!-- Big corner buttons (overlay above webview) -->
-  <div id="cornerBackBtn" class="corner-btn" aria-label="Back">⟵</div>
-  <div id="cornerFwdBtn"  class="corner-btn" aria-label="Forward">⟶</div>
+  <div id="back" class="corner">⟵</div>
+  <div id="fwd" class="corner">⟶</div>
 
-  <div class="camera-overlay" id="cameraOverlay">
-    <div class="camera-header"><span>Hand Tracking</span><button id="toggleCamera">📷</button></div>
+  <div class="cam" id="cam">
+    <div class="cam-hdr"><span>Hand Tracking</span><button class="cam-toggle" id="camtog">📷</button></div>
     <video id="video" autoplay playsinline></video>
     <canvas id="canvas"></canvas>
   </div>
 
-  <div class="gesture-indicator" id="gestureIndicator">Initializing…</div>
+  <div class="hud" id="hud">Initializing…</div>
 
-  <!-- Always-on dual crosshairs -->
-  <div id="crosshair1" class="crosshair"><div class="ring"></div><div class="hline"></div><div class="vline"></div></div>
-  <div id="crosshair2" class="crosshair"><div class="ring"></div><div class="hline"></div><div class="vline"></div></div>
+  <div id="ch1" class="cross"><div class="ring"></div><div class="h"></div><div class="v"></div></div>
+  <div id="ch2" class="cross"><div class="ring"></div><div class="h"></div><div class="v"></div></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
 
   <script>
-    const { HAND_CONNECTIONS } = window;
-
-    /* ---------- Pinch detector with smoothing & deadzone ---------- */
-    class PinchClick {
-      constructor() {
-        this.pinchFrames = [0,0];
-        this.wasPinching = [false,false];
-        this.pinchStart = [{x:0,y:0},{x:0,y:0}];
-        this.smooth = [{x:0,y:0},{x:0,y:0}];
-        this.lastOut = [{x:0,y:0},{x:0,y:0}];
-        this.lastClickAt = 0;
-        this.THRESH_FRAMES = 3;
-        this.DIST_THRESH  = 0.06;
-        this.ALPHA        = 0.35;
-        this.DEADZONE_PIX = 6;
-        this.COOLDOWN_MS  = 180;
-      }
-      _dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
-      isPinching(lm, idx){ const pinchNow = this._dist(lm[4], lm[8]) < this.DIST_THRESH; this.pinchFrames[idx] = pinchNow ? this.pinchFrames[idx]+1 : 0; return this.pinchFrames[idx] >= this.THRESH_FRAMES; }
-      tip(lm){ return { x: lm[4].x, y: lm[4].y }; }
-      ema(idx, cur){ const s=this.smooth[idx]; if(s.x===0&&s.y===0){ this.smooth[idx]={...cur}; return cur; } s.x += this.ALPHA*(cur.x-s.x); s.y += this.ALPHA*(cur.y-s.y); return {x:s.x,y:s.y}; }
-      withinDeadzone(idx, pxX, pxY){ const p=this.lastOut[idx]; return Math.hypot(pxX-p.x, pxY-p.y) < this.DEADZONE_PIX; }
-      rememberOut(idx, pxX, pxY){ this.lastOut[idx]={x:pxX,y:pxY}; }
-      canClick(){ return (performance.now()-this.lastClickAt) > this.COOLDOWN_MS; }
-      markClicked(){ this.lastClickAt = performance.now(); }
-    }
-
-    /* ---------- Index-finger-only gesture detector ---------- */
-    class IndexOnly {
-      constructor() {
-        this.frames = 0;
-        this.ACTIVE_FRAMES = 8;
-        this.MARGIN = 0.02;
-        this.cooldownAt = 0;
-        this.COOLDOWN_MS = 1500; // increased
-        this.active = false;
-      }
-      extended(lm, tip, pip){ return (lm[tip].y + this.MARGIN) < lm[pip].y; } // smaller y = higher
-      curled(lm, tip, pip){   return (lm[tip].y) > (lm[pip].y - this.MARGIN); }
-      isActivePose(lm){
-        const indexUp   = this.extended(lm, 8, 6);
-        const middleDn  = this.curled(lm, 12, 10);
-        const ringDn    = this.curled(lm, 16, 14);
-        const pinkyDn   = this.curled(lm, 20, 18);
-        return indexUp && middleDn && ringDn && pinkyDn;
-      }
-      update(lm){
-        const now = performance.now();
-        if (now - this.cooldownAt < this.COOLDOWN_MS) { this.frames=0; this.active=false; return false; }
-        if (this.isActivePose(lm)) {
-          this.frames++;
-          if (!this.active && this.frames >= this.ACTIVE_FRAMES) { this.active = true; return true; }
-        } else { this.frames=0; this.active=false; }
-        return false;
-      }
-      armCooldown(){ this.cooldownAt = performance.now(); this.active=false; this.frames=0; }
-    }
-
-    /* ---------- "L" pose (index up + thumb out) -> back/forward ---------- */
-    class LGesture {
-      constructor() {
-        this.frames = [0,0];
-        this.cooldownAt = [0,0];
-        this.ACTIVE_FRAMES = 6;
-        this.COOLDOWN_MS = 900;
-        this.MARGIN_Y = 0.02;
-        this.MARGIN_X = 0.04;
-      }
-      extendedY(lm, tip, pip){ return (lm[tip].y + this.MARGIN_Y) < lm[pip].y; }
-      curledY(lm, tip, pip){   return (lm[tip].y) > (lm[pip].y - this.MARGIN_Y); }
-      update(i, lm, handed) {
-        const now = performance.now();
-        if (now - this.cooldownAt[i] < this.COOLDOWN_MS) { this.frames[i]=0; return null; }
-
-        const indexUp  = this.extendedY(lm, 8, 6);
-        const middleDn = this.curledY(lm, 12,10);
-        const ringDn   = this.curledY(lm, 16,14);
-        const pinkyDn  = this.curledY(lm, 20,18);
-
-        const thumbTipX = lm[4].x;
-        const indexMCPX = lm[5].x;
-        const thumbOutLeft  = thumbTipX < (indexMCPX - this.MARGIN_X);
-        const thumbOutRight = thumbTipX > (indexMCPX + this.MARGIN_X);
-
-        const pose = indexUp && middleDn && ringDn && pinkyDn && (thumbOutLeft || thumbOutRight);
-        if (!pose) { this.frames[i]=0; return null; }
-
-        this.frames[i]++;
-        if (this.frames[i] >= this.ACTIVE_FRAMES) {
-          this.frames[i]=0;
-          this.cooldownAt[i]=now;
-
-          if (handed === 'Left'  && thumbOutLeft)  return 'back';
-          if (handed === 'Right' && thumbOutRight) return 'forward';
-          if (!handed) {
-            if (thumbOutLeft)  return 'back';
-            if (thumbOutRight) return 'forward';
-          }
-        }
-        return null;
-      }
-    }
-
-    /* ---------- MediaPipe (skeleton overlay only) ---------- */
-    class MediaPipeHandler {
-      constructor(onResults) {
-        this.video = document.getElementById('video');
-        this.canvas = document.getElementById('canvas');
-        this.ctx = this.canvas.getContext('2d');
-        this.onResultsCallback = onResults;
-        this.init();
-      }
-      async init() {
-        try {
-          const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
-          hands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
-          hands.onResults(r => this.process(r));
-          const camera = new Camera(this.video, { onFrame: async () => hands.send({ image:this.video }), width:640, height:480 });
-          await camera.start();
-          document.getElementById('gestureIndicator').textContent = 'Pinch=click/drag • L(left)=Back • L(right)=Forward • index→YouTube';
-        } catch (e) { console.error('MediaPipe init error:', e); }
-      }
-      process(results) {
-        this.canvas.width = this.video.videoWidth || 640;
-        this.canvas.height = this.video.videoHeight || 480;
-        this.ctx.clearRect(0,0,this.canvas.width,this.canvas.height);
-        if (results.multiHandLandmarks?.length) {
-          for (const lm of results.multiHandLandmarks) {
-            drawConnectors(this.ctx, lm, HAND_CONNECTIONS, { color:'#fff', lineWidth:3 });
-            drawLandmarks(this.ctx, lm, { color:'#0f0', lineWidth:2, radius:6 });
-          }
-        }
-        this.onResultsCallback?.(results);
-      }
-    }
-
-    // ---------- App state ----------
-    const webview = document.getElementById('webview');
-    const indicator = document.getElementById('gestureIndicator');
-    const ch = [document.getElementById('crosshair1'), document.getElementById('crosshair2')];
-    const pinch = new PinchClick();
-    const indexOnlyLeft  = new IndexOnly();
-    const indexOnlyRight = new IndexOnly();
-    const lGesture = new LGesture();
-
-    // Corner buttons
-    const cornerBackBtn = document.getElementById('cornerBackBtn');
-    const cornerFwdBtn  = document.getElementById('cornerFwdBtn');
-
-    // --------- Debounced navigation helpers ---------
+    const {HAND_CONNECTIONS} = window;
+    const wv = document.getElementById('wv');
+    const hud = document.getElementById('hud');
+    const ch = [document.getElementById('ch1'), document.getElementById('ch2')];
+    const backBtn = document.getElementById('back');
+    const fwdBtn = document.getElementById('fwd');
+    
+    // State per hand
+    const state = [{},{pinch:0,was:false,start:{x:0,y:0},smooth:{x:0,y:0},last:{x:0,y:0},pan:{x:0,y:0},panned:false}];
+    for(let i=0;i<2;i++) state[i] = {pinch:0,was:false,start:{x:0,y:0},smooth:{x:0,y:0},last:{x:0,y:0},pan:{x:0,y:0},panned:false};
+    let clickCool = 0;
     let navLock = false;
-    function sameOrigin(u1, u2) {
-      try { return new URL(u1).origin === new URL(u2).origin; } catch { return false; }
-    }
-    function navigateOnce(url) {
-      if (navLock) return;
-      const current = webview.getURL?.() || document.getElementById('addressBar').value;
-      if (current && sameOrigin(current, url)) return; // already on that site
-      navLock = true;
-      try { webview.loadURL(url); } catch { setTimeout(() => navLock = false, 500); }
-    }
 
-    // Pan state per hand
-    const panLast = [{x:0,y:0},{x:0,y:0}];
-    const hasPanned = [false,false];
-    const PAN_MOVE_THR = 2;     // px before we consider it a pan step
-    const SCROLL_SCALE = 1.0;   // hand px -> wheel px
+    // Config
+    const PINCH_DIST = 0.06;
+    const PINCH_FRAMES = 3;
+    const SMOOTH = 0.35;
+    const DEADZONE = 6;
+    const PAN_THR = 2;
+    const CLICK_COOL = 180;
+    const SCROLL_MULT = 3.5; // Increase vertical scroll sensitivity
 
-    // Crosshair helpers
-    function showCH(i,x,y){ const el=ch[i]; el.style.left=x+'px'; el.style.top=y+'px'; el.classList.add('visible'); }
-    function moveCH(i,x,y){ const el=ch[i]; el.style.left=x+'px'; el.style.top=y+'px'; }
-    function setCHPinch(i,on){ ch[i].classList.toggle('pinch', !!on); }
-    function pulseCH(i){ const el=ch[i]; el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse'); }
-    function hideCH(i){ ch[i].classList.remove('visible','pinch','pulse'); }
+    // Helpers
+    const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+    const showCH = (i,x,y) => { ch[i].style.left=x+'px'; ch[i].style.top=y+'px'; ch[i].classList.add('on'); };
+    const moveCH = (i,x,y) => { ch[i].style.left=x+'px'; ch[i].style.top=y+'px'; };
+    const pinchCH = (i,on) => ch[i].classList.toggle('pinch', on);
+    const pulseCH = i => { ch[i].classList.remove('pulse'); void ch[i].offsetWidth; ch[i].classList.add('pulse'); };
+    const hideCH = i => ch[i].classList.remove('on','pinch','pulse');
+    const hit = (el) => { el.classList.add('hit'); setTimeout(()=>el.classList.remove('hit'), 140); };
 
-    // Native mouse events
-    function nativeClick(vx, vy) {
-      const rect = webview.getBoundingClientRect();
-      const x = Math.max(0, Math.min(rect.width  - 1, Math.round(vx)));
-      const y = Math.max(0, Math.min(rect.height - 1, Math.round(vy)));
+    // Native events
+    function click(vx,vy) {
+      const r = wv.getBoundingClientRect();
+      const x = Math.max(0, Math.min(r.width-1, Math.round(vx)));
+      const y = Math.max(0, Math.min(r.height-1, Math.round(vy)));
       try {
-        webview.focus();
-        webview.sendInputEvent({ type:'mouseMove', x, y, movementX:0, movementY:0 });
-        webview.sendInputEvent({ type:'mouseDown', x, y, button:'left', clickCount:1 });
-        webview.sendInputEvent({ type:'mouseUp',   x, y, button:'left', clickCount:1 });
+        wv.focus();
+        wv.sendInputEvent({type:'mouseMove', x, y, movementX:0, movementY:0});
+        wv.sendInputEvent({type:'mouseDown', x, y, button:'left', clickCount:1});
+        wv.sendInputEvent({type:'mouseUp', x, y, button:'left', clickCount:1});
         return true;
-      } catch (e) { console.error('nativeClick failed', e); return false; }
+      } catch(e) { return false; }
     }
-    function nativeScroll(vx, vy, dX, dY) {
-      const rect = webview.getBoundingClientRect();
-      const x = Math.max(0, Math.min(rect.width  - 1, Math.round(vx)));
-      const y = Math.max(0, Math.min(rect.height - 1, Math.round(vy)));
+
+    function scroll(vx,vy,dx,dy) {
+      const r = wv.getBoundingClientRect();
+      const x = Math.max(0, Math.min(r.width-1, Math.round(vx)));
+      const y = Math.max(0, Math.min(r.height-1, Math.round(vy)));
       try {
-        webview.focus();
-        webview.sendInputEvent({
-          type:'mouseWheel',
-          x, y,
-          deltaX: Math.round(dX),
-          deltaY: Math.round(dY),
-          canScroll: true,
-          hasPreciseScrollingDeltas: true
-        });
+        wv.sendInputEvent({type:'mouseWheel', x, y, deltaX:Math.round(dx), deltaY:Math.round(dy), canScroll:true});
         return true;
-      } catch (e) { console.error('nativeScroll failed', e); return false; }
+      } catch(e) { return false; }
     }
 
-    // Helpers for corner button visual press
-    function pressCorner(el){
-      el.classList.add('active');
-      setTimeout(()=>el.classList.remove('active'), 140);
-    }
+    // Process hand results
+    function onResults(res) {
+      const r = wv.getBoundingClientRect();
+      const hands = res.multiHandLandmarks || [];
+      
+      // Draw skeleton
+      const ctx = canvas.getContext('2d');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      if(hands.length) {
+        for(const lm of hands) {
+          drawConnectors(ctx, lm, HAND_CONNECTIONS, {color:'#fff', lineWidth:3});
+          drawLandmarks(ctx, lm, {color:'#0f0', lineWidth:2, radius:6});
+        }
+      }
 
-    // Allow normal mouse/touch clicks on big buttons
-    cornerBackBtn.addEventListener('click', () => { if (webview.canGoBack()) { webview.goBack(); indicator.textContent='◀ Back'; } });
-    cornerFwdBtn.addEventListener('click',  () => { if (webview.canGoForward()) { webview.goForward(); indicator.textContent='Forward ▶'; } });
+      for(let i=0;i<2;i++) {
+        const lm = hands[i];
+        if(!lm) { if(state[i].was) pulseCH(i); hideCH(i); state[i].was=false; continue; }
+        
+        // Mirror & smooth thumb tip
+        const mir = lm.map(p=>({...p, x:1-p.x}));
+        const raw = {x:mir[4].x, y:mir[4].y};
+        const s = state[i].smooth;
+        if(!s.x && !s.y) { s.x=raw.x; s.y=raw.y; }
+        s.x += SMOOTH*(raw.x-s.x);
+        s.y += SMOOTH*(raw.y-s.y);
+        
+        // View coords with deadzone
+        let vx = s.x*r.width, vy = s.y*r.height;
+        if(dist({x:vx,y:vy}, state[i].last) < DEADZONE) { vx=state[i].last.x; vy=state[i].last.y; }
+        else { state[i].last = {x:vx,y:vy}; }
+        
+        const sx = r.left+vx, sy = r.top+vy;
+        if(!ch[i].classList.contains('on')) showCH(i,sx,sy); else moveCH(i,sx,sy);
 
-    // Always-on crosshairs + pinch (drag to pan, release to click if not dragged) + gestures
-    function onResults(results) {
-      const rect = webview.getBoundingClientRect();
-      const hands = results.multiHandLandmarks || [];
-      const handedness = results.multiHandedness || []; // [{label:'Left'|'Right', score:...}, ...]
+        // Pinch detect
+        const d = dist(mir[4], mir[8]);
+        if(d < PINCH_DIST) state[i].pinch++; else state[i].pinch=0;
+        const pinch = state[i].pinch >= PINCH_FRAMES;
 
-      for (let i=0;i<2;i++){
-        const lmSrc = hands[i];
-        if (!lmSrc) { if (pinch.wasPinching[i]) pulseCH(i); hideCH(i); pinch.wasPinching[i]=false; continue; }
-
-        // Mirror X to match user's mirrored view
-        const lm = lmSrc.map(p => ({...p, x: 1 - p.x}));
-        const handLabel = handedness[i]?.label || '';
-
-        // ----- Always-on crosshair following thumb (smoothed) -----
-        const rawTip = pinch.tip(lm);
-        const tip = pinch.ema(i, rawTip);
-        let vx = tip.x * rect.width, vy = tip.y * rect.height;
-        if (pinch.withinDeadzone(i, vx, vy)) { vx = pinch.lastOut[i].x; vy = pinch.lastOut[i].y; } else { pinch.rememberOut(i, vx, vy); }
-        const sx = rect.left + vx, sy = rect.top + vy;
-        if (!ch[i].classList.contains('visible')) showCH(i, sx, sy); else moveCH(i, sx, sy);
-
-        // ----- Pinch detection (click or pan) -----
-        const isPinch = pinch.isPinching(lm, i);
-
-        if (isPinch && !pinch.wasPinching[i]) {
-          // Pinch start -> prep for pan & potential click
-          pinch.pinchStart[i] = { x: vx/rect.width, y: vy/rect.height };
-          panLast[i] = { x: vx, y: vy };
-          hasPanned[i] = false;
-          setCHPinch(i, true);
-          indicator.textContent = 'Pinching… (drag to scroll)';
-        } else if (isPinch && pinch.wasPinching[i]) {
-          // Pinch drag -> translate to mouseWheel deltas
-          const dx = vx - panLast[i].x;
-          const dy = vy - panLast[i].y;
-
-          if (Math.abs(dx) > PAN_MOVE_THR || Math.abs(dy) > PAN_MOVE_THR) {
-            hasPanned[i] = true;
-            const wheelX = -dx * SCROLL_SCALE;
-            const wheelY = -dy * SCROLL_SCALE;
-            nativeScroll(vx, vy, wheelX, wheelY);
-            panLast[i] = { x: vx, y: vy };
-            indicator.textContent = 'PANNING…';
+        if(pinch && !state[i].was) {
+          state[i].start = {x:vx/r.width, y:vy/r.height};
+          state[i].pan = {x:vx, y:vy};
+          state[i].panned = false;
+          pinchCH(i, true);
+          hud.textContent = 'Pinching…';
+        } else if(pinch && state[i].was) {
+          const dx = vx - state[i].pan.x;
+          const dy = vy - state[i].pan.y;
+          if(Math.abs(dx)>PAN_THR || Math.abs(dy)>PAN_THR) {
+            state[i].panned = true;
+            // Inverted: dragging down scrolls page down (positive deltaY), dragging up scrolls page up (negative deltaY)
+            // Multiply Y for more vertical sensitivity
+            scroll(vx, vy, dx * 1.5, dy * SCROLL_MULT);
+            state[i].pan = {x:vx, y:vy};
+            hud.textContent = 'PANNING…';
           }
-        } else if (!isPinch && pinch.wasPinching[i]) {
-          // Pinch released -> if we panned, do NOT click.
-          setCHPinch(i, false);
+        } else if(!pinch && state[i].was) {
+          pinchCH(i, false);
           pulseCH(i);
-
-          // Where did we release (page coords)?
-          const releaseGX = rect.left + vx;  // using current thumb pos (more intuitive)
-          const releaseGY = rect.top  + vy;
-          const hit = document.elementFromPoint(Math.round(releaseGX), Math.round(releaseGY));
-
-          // If over our big corner buttons, trigger them instead of webview click
-          if (!hasPanned[i] && hit) {
-            const onBack = hit.closest?.('#cornerBackBtn');
-            const onFwd  = hit.closest?.('#cornerFwdBtn');
-            if (onBack) {
-              pressCorner(cornerBackBtn);
-              if (webview.canGoBack()) webview.goBack();
-              indicator.textContent = '◀ Back';
-              pinch.wasPinching[i] = false;
-              continue; // skip webview click
-            }
-            if (onFwd) {
-              pressCorner(cornerFwdBtn);
-              if (webview.canGoForward()) webview.goForward();
-              indicator.textContent = 'Forward ▶';
-              pinch.wasPinching[i] = false;
-              continue; // skip webview click
-            }
+          
+          const el = document.elementFromPoint(Math.round(sx), Math.round(sy));
+          if(!state[i].panned && el) {
+            if(el.closest('#back')) { hit(backBtn); if(wv.canGoBack()) wv.goBack(); hud.textContent='◀ Back'; state[i].was=false; continue; }
+            if(el.closest('#fwd'))  { hit(fwdBtn); if(wv.canGoForward()) wv.goForward(); hud.textContent='Forward ▶'; state[i].was=false; continue; }
           }
-
-          // Otherwise: click inside webview (at pinch START to reduce jitter)
-          if (!hasPanned[i] && pinch.canClick()) {
-            pinch.markClicked();
-            const cx = pinch.pinchStart[i].x * rect.width;
-            const cy = pinch.pinchStart[i].y * rect.height;
-            const ok = nativeClick(cx, cy);
-            indicator.textContent = ok ? 'CLICK!' : 'Click failed';
-            setTimeout(() => { indicator.textContent = 'Gestures ready: pinch=click/drag • L(left)=Back • L(right)=Forward • index→YouTube'; }, ok ? 400 : 800);
-          } else {
-            setTimeout(() => { indicator.textContent = 'Gestures ready: pinch=click/drag • L(left)=Back • L(right)=Forward • index→YouTube'; }, 300);
-          }
+          
+          if(!state[i].panned && performance.now()-clickCool > CLICK_COOL) {
+            clickCool = performance.now();
+            const cx = state[i].start.x*r.width, cy = state[i].start.y*r.height;
+            const ok = click(cx, cy);
+            hud.textContent = ok ? 'CLICK!' : 'Click failed';
+            setTimeout(()=>hud.textContent='Pinch=click/drag', ok?400:800);
+          } else setTimeout(()=>hud.textContent='Pinch=click/drag', 300);
         }
-        pinch.wasPinching[i] = isPinch;
-
-        // ----- "L" gesture: Back/Forward (only when NOT pinching to avoid conflicts)
-        if (!isPinch) {
-          const navAction = lGesture.update(i, lm, handLabel);
-          if (navAction === 'back') {
-            if (webview.canGoBack()) { webview.goBack(); indicator.textContent = '◀︎ Back'; }
-          } else if (navAction === 'forward') {
-            if (webview.canGoForward()) { webview.goForward(); indicator.textContent = 'Forward ▶︎'; }
-          }
-        }
-
-        // ----- Index-only gesture (either hand) → open YouTube (debounced)
-        const idxDetector = (i === 0) ? indexOnlyLeft : indexOnlyRight;
-        if (idxDetector.update(lm)) {
-          navigateOnce('https://www.youtube.com');
-          indicator.textContent = 'Opening YouTube…';
-          idxDetector.armCooldown();
-        }
+        state[i].was = pinch;
       }
-
-      if (!hands.length) { hideCH(0); hideCH(1); indicator.textContent = 'Show hands: pinch=click/drag • L(left)=Back • L(right)=Forward • index→YouTube'; }
+      
+      if(!hands.length) { hideCH(0); hideCH(1); hud.textContent='Show hands to control'; }
     }
 
-    // Start MediaPipe
-    new MediaPipeHandler(onResults);
+    // MediaPipe init
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const hands = new Hands({locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+    hands.setOptions({maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.5, minTrackingConfidence:0.5});
+    hands.onResults(onResults);
+    new Camera(video, {onFrame: async()=>hands.send({image:video}), width:640, height:480}).start()
+      .then(()=>hud.textContent='Pinch=click/drag');
 
-    // ----- Browser chrome wiring -----
-    const addressBar = document.getElementById('addressBar');
-    function resolveUrl(v){ v=(v||'').trim(); if(!v) return ''; if(v.startsWith('http://')||v.startsWith('https://')) return v; if(v.endsWith('.html')||v.startsWith('./')||v.startsWith('/')) return v; return 'https://'+v; }
-    addressBar.addEventListener('keypress', (e) => { if (e.key==='Enter'){ const url=resolveUrl(e.target.value); if(url) navigateOnce(url); }});
-    document.getElementById('reloadBtn').addEventListener('click', () => webview.reload());
-    document.getElementById('backBtn').addEventListener('click', () => webview.canGoBack() && webview.goBack());
-    document.getElementById('forwardBtn').addEventListener('click', () => webview.canGoForward() && webview.goForward());
-    document.getElementById('toggleCamera').addEventListener('click', () => {
-      const overlay=document.getElementById('cameraOverlay');
-      overlay.style.display = overlay.style.display==='none' ? 'block' : 'none';
-    });
-    document.getElementById('gestureToggle').addEventListener('click', () => {
-      const overlay=document.getElementById('cameraOverlay');
-      overlay.style.display = overlay.style.display==='none' ? 'block' : 'none';
-    });
+    // Chrome controls
+    const url = document.getElementById('url');
+    const resolve = v => { v=(v||'').trim(); if(!v) return ''; if(/^https?:\/\//.test(v)) return v; return 'https://'+v; };
+    url.addEventListener('keypress', e=>{ if(e.key==='Enter'){ const u=resolve(e.target.value); if(u && !navLock) { navLock=true; wv.loadURL(u); }}});
+    document.getElementById('rl').addEventListener('click', ()=>wv.reload());
+    document.getElementById('bk').addEventListener('click', ()=>wv.canGoBack() && wv.goBack());
+    document.getElementById('fw').addEventListener('click', ()=>wv.canGoForward() && wv.goForward());
+    document.getElementById('tog').addEventListener('click', ()=>cam.style.display = cam.style.display==='none'?'block':'none');
+    document.getElementById('camtog').addEventListener('click', ()=>cam.style.display='none');
+    backBtn.addEventListener('click', ()=>{ if(wv.canGoBack()) wv.goBack(); });
+    fwdBtn.addEventListener('click', ()=>{ if(wv.canGoForward()) wv.goForward(); });
 
-    // Keep address bar synced + manage nav lock
-    function setAddressBar(url){ addressBar.value = url; }
-    webview.addEventListener('did-start-loading', () => { /* keep lock */ });
-    webview.addEventListener('did-stop-loading', () => { navLock = false; });
-
-    webview.addEventListener('did-navigate', (e) => setAddressBar(e.url));
-    webview.addEventListener('did-navigate-in-page', (e) => setAddressBar(e.url));
-
-    // Ignore harmless ERR_ABORTED (-3) and release lock
-    webview.addEventListener('did-fail-load', (e) => {
-      if (e.errorCode !== -3) {
-        console.warn('Navigation failed:', e.errorCode, e.errorDescription, e.validatedURL);
-      }
-      navLock = false;
-    });
+    wv.addEventListener('did-navigate', e=>url.value=e.url);
+    wv.addEventListener('did-navigate-in-page', e=>url.value=e.url);
+    wv.addEventListener('did-stop-loading', ()=>navLock=false);
+    wv.addEventListener('did-fail-load', ()=>navLock=false);
   </script>
 </body>
 </html>
