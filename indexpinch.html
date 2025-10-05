@@ -162,25 +162,7 @@
             z-index: 1000;
         }
 
-        .countdown-indicator {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(0, 0, 0, 0.9);
-            color: white;
-            padding: 30px 50px;
-            border-radius: 16px;
-            font-size: 48px;
-            font-weight: bold;
-            z-index: 2500;
-            display: none;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
-        }
 
-        .countdown-indicator.active {
-            display: block;
-        }
 
         .cursor-dot {
             position: fixed;
@@ -318,11 +300,8 @@
         Initializing...
     </div>
 
-    <div class="countdown-indicator" id="countdownIndicator">
-        1.5
-    </div>
-
-    <div class="cursor-dot" id="clickDot"></div>
+    <div class="cursor-dot" id="clickDot1"></div>
+    <div class="cursor-dot" id="clickDot2"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
@@ -374,10 +353,9 @@
 
             getPinchPosition(landmarks) {
                 const thumbTip = landmarks[4];
-                const indexTip = landmarks[8];
                 return {
-                    x: (thumbTip.x + indexTip.x) / 2,
-                    y: (thumbTip.y + indexTip.y) / 2
+                    x: thumbTip.x,
+                    y: thumbTip.y
                 };
             }
 
@@ -720,221 +698,153 @@
 
         const gestureController = new GestureController();
         const browserController = new BrowserController();
-        const clickDot = document.getElementById('clickDot');
+        const clickDot1 = document.getElementById('clickDot1');
+        const clickDot2 = document.getElementById('clickDot2');
         const gestureIndicator = document.getElementById('gestureIndicator');
-        const countdownIndicator = document.getElementById('countdownIndicator');
 
-        let lastSwipeTime = 0;
-        let lastPinchState = false;
-        let pinchStartTime = null;
-        let countdownInterval = null;
-        let isDragging = false;
-        let dragStartX = 0;
-        let dragStartY = 0;
-        let lastPinchX = 0;
-        let lastPinchY = 0;
+        let lastPinchState = [false, false];
+        let lastPinchX = [0, 0];
+        let lastPinchY = [0, 0];
+        let lastTwoHandDistance = null;
 
         function onMediaPipeResults(results) {
-            let isPinchingNow = false;
-            let pinchX = 0;
-            let pinchY = 0;
-            let hasHand = false;
+            const hands = [];
             
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 results.multiHandLandmarks.forEach((landmarks, idx) => {
                     const isPinching = gestureController.isPinching(landmarks);
-                    
-                    // Always track pinch position for cursor display
                     const pinchPos = gestureController.getPinchPosition(landmarks);
-                    pinchX = 1 - pinchPos.x;
-                    pinchY = pinchPos.y;
-                    hasHand = true;
                     
-                    if (isPinching) {
-                        isPinchingNow = true;
-                    }
+                    hands.push({
+                        idx: idx,
+                        isPinching: isPinching,
+                        pinchX: 1 - pinchPos.x,
+                        pinchY: pinchPos.y
+                    });
                 });
             }
             
             const webview = document.getElementById('webview');
             const rect = webview.getBoundingClientRect();
             
-            // Always show cursor when hand is detected
-            if (hasHand) {
-                const screenX = rect.left + pinchX * rect.width;
-                const screenY = rect.top + pinchY * rect.height;
-                
-                clickDot.style.left = screenX + 'px';
-                clickDot.style.top = screenY + 'px';
-                clickDot.classList.add('active');
-                
-                // Store last pinch position
-                lastPinchX = pinchX;
-                lastPinchY = pinchY;
-            } else {
-                // Hide cursor when no hand detected
-                clickDot.classList.remove('active');
-            }
+            // Update cursors for each hand
+            const cursors = [clickDot1, clickDot2];
             
-            // Show red dot when pinching
-            if (isPinchingNow) {
+            // Check if both hands are pinching (zoom gesture)
+            if (hands.length === 2 && hands[0].isPinching && hands[1].isPinching) {
+                // Two-hand pinch zoom
+                const hand1X = hands[0].pinchX;
+                const hand1Y = hands[0].pinchY;
+                const hand2X = hands[1].pinchX;
+                const hand2Y = hands[1].pinchY;
                 
-                // Start countdown when pinch begins
-                if (!lastPinchState) {
-                    pinchStartTime = Date.now();
-                    dragStartX = pinchX;
-                    dragStartY = pinchY;
-                    isDragging = false;
+                const distance = Math.sqrt(
+                    Math.pow(hand2X - hand1X, 2) + 
+                    Math.pow(hand2Y - hand1Y, 2)
+                );
+                
+                if (lastTwoHandDistance !== null) {
+                    const distanceDelta = distance - lastTwoHandDistance;
+                    const zoomFactor = 1 + (distanceDelta * 2);
                     
-                    // Start countdown
-                    countdownIndicator.classList.add('active');
-                    let remainingTime = 1.5;
+                    webview.setZoomFactor(webview.getZoomFactor() * zoomFactor);
                     
-                    countdownInterval = setInterval(() => {
-                        remainingTime -= 0.1;
-                        if (remainingTime <= 0) {
-                            remainingTime = 0;
-                        }
-                        countdownIndicator.textContent = remainingTime.toFixed(1);
-                    }, 100);
+                    gestureIndicator.textContent = `Zooming... ${(webview.getZoomFactor() * 100).toFixed(0)}%`;
                 }
                 
-                // Check if we should start dragging
-                const elapsedTime = Date.now() - pinchStartTime;
-                if (elapsedTime >= 1500 && !isDragging) {
-                    isDragging = true;
-                    clearInterval(countdownInterval);
-                    countdownIndicator.classList.remove('active');
-                    
-                    const localX = dragStartX * rect.width;
-                    const localY = dragStartY * rect.height;
-                    
-                    console.log('START DRAG at:', localX, localY);
-                    gestureIndicator.textContent = 'Dragging...';
-                    
-                    // Mouse down to start drag
-                    webview.executeJavaScript(`
-                        (function() {
-                            const x = ${localX};
-                            const y = ${localY};
-                            
-                            const element = document.elementFromPoint(x, y);
-                            
-                            if (element) {
-                                console.log('Starting drag on:', element.tagName);
-                                const mouseDown = new MouseEvent('mousedown', {
-                                    bubbles: true,
-                                    cancelable: true,
-                                    view: window,
-                                    clientX: x,
-                                    clientY: y,
-                                    button: 0
+                lastTwoHandDistance = distance;
+                
+                // Update both cursors
+                for (let i = 0; i < 2; i++) {
+                    const screenX = rect.left + hands[i].pinchX * rect.width;
+                    const screenY = rect.top + hands[i].pinchY * rect.height;
+                    cursors[i].style.left = screenX + 'px';
+                    cursors[i].style.top = screenY + 'px';
+                    cursors[i].classList.add('active');
+                    lastPinchState[i] = true;
+                    lastPinchX[i] = hands[i].pinchX;
+                    lastPinchY[i] = hands[i].pinchY;
+                }
+            } else {
+                // Single hand or no zoom
+                lastTwoHandDistance = null;
+                
+                for (let i = 0; i < 2; i++) {
+                    if (i < hands.length) {
+                        const hand = hands[i];
+                        const cursor = cursors[i];
+                        
+                        const screenX = rect.left + hand.pinchX * rect.width;
+                        const screenY = rect.top + hand.pinchY * rect.height;
+                        
+                        cursor.style.left = screenX + 'px';
+                        cursor.style.top = screenY + 'px';
+                        cursor.classList.add('active');
+                        
+                        // Handle pinching
+                        if (hand.isPinching) {
+                            if (lastPinchState[i]) {
+                                // Already pinching - calculate scroll delta
+                                const deltaX = (hand.pinchX - lastPinchX[i]) * rect.width;
+                                const deltaY = (hand.pinchY - lastPinchY[i]) * rect.height;
+                                
+                                // Scroll the page
+                                webview.executeJavaScript(`
+                                    window.scrollBy(${-deltaX}, ${-deltaY});
+                                `).catch(err => {
+                                    console.error('Scroll failed:', err);
                                 });
-                                element.dispatchEvent(mouseDown);
+                                
+                                gestureIndicator.textContent = 'Scrolling...';
+                            } else {
+                                gestureIndicator.textContent = 'Pinch detected';
                             }
-                        })();
-                    `).catch(err => {
-                        console.error('Drag start failed:', err);
-                    });
-                }
-                
-                // Continue dragging - send mousemove events
-                if (isDragging) {
-                    const localX = pinchX * rect.width;
-                    const localY = pinchY * rect.height;
-                    
-                    webview.executeJavaScript(`
-                        (function() {
-                            const x = ${localX};
-                            const y = ${localY};
                             
-                            const mouseMove = new MouseEvent('mousemove', {
-                                bubbles: true,
-                                cancelable: true,
-                                view: window,
-                                clientX: x,
-                                clientY: y,
-                                button: 0
-                            });
-                            document.dispatchEvent(mouseMove);
-                        })();
-                    `).catch(err => {
-                        console.error('Drag move failed:', err);
-                    });
-                }
-                
-            } else {
-                // Pinch released (but cursor still visible if hand is present)
-                
-                if (lastPinchState) {
-                    clearInterval(countdownInterval);
-                    countdownIndicator.classList.remove('active');
-                    
-                    const elapsedTime = Date.now() - pinchStartTime;
-                    
-                    if (isDragging) {
-                        // End drag - NO CLICK
-                        console.log('END DRAG');
-                        const localX = pinchX * rect.width;
-                        const localY = pinchY * rect.height;
-                        
-                        webview.executeJavaScript(`
-                            (function() {
-                                const x = ${localX};
-                                const y = ${localY};
+                            lastPinchState[i] = true;
+                        } else {
+                            // Pinch released
+                            if (lastPinchState[i]) {
+                                // Click on release - use viewport coordinates (no zoom adjustment needed)
+                                const localX = lastPinchX[i] * rect.width;
+                                const localY = lastPinchY[i] * rect.height;
                                 
-                                const mouseUp = new MouseEvent('mouseup', {
-                                    bubbles: true,
-                                    cancelable: true,
-                                    view: window,
-                                    clientX: x,
-                                    clientY: y,
-                                    button: 0
+                                console.log('CLICK at:', localX, localY);
+                                
+                                webview.executeJavaScript(`
+                                    (function() {
+                                        const x = ${localX};
+                                        const y = ${localY};
+                                        
+                                        const element = document.elementFromPoint(x, y);
+                                        
+                                        if (element) {
+                                            console.log('Clicking element:', element.tagName);
+                                            element.click();
+                                        }
+                                    })();
+                                `).catch(err => {
+                                    console.error('Click failed:', err);
                                 });
-                                document.dispatchEvent(mouseUp);
-                            })();
-                        `).catch(err => {
-                            console.error('Drag end failed:', err);
-                        });
+                                
+                                gestureIndicator.textContent = 'Click!';
+                            }
+                            
+                            lastPinchState[i] = false;
+                        }
                         
-                        gestureIndicator.textContent = 'Drag ended';
-                        isDragging = false;
+                        lastPinchX[i] = hand.pinchX;
+                        lastPinchY[i] = hand.pinchY;
                     } else {
-                        // Click on release (not dragging and released before 1.5 seconds)
-                        // Use last known pinch position (where it was released)
-                        const localX = lastPinchX * rect.width;
-                        const localY = lastPinchY * rect.height;
-                        
-                        console.log('CLICK ON RELEASE at:', localX, localY);
-                        
-                        webview.executeJavaScript(`
-                            (function() {
-                                const x = ${localX};
-                                const y = ${localY};
-                                
-                                const element = document.elementFromPoint(x, y);
-                                
-                                if (element) {
-                                    console.log('Clicking element:', element.tagName);
-                                    element.click();
-                                }
-                            })();
-                        `).catch(err => {
-                            console.error('Click failed:', err);
-                        });
-                        
-                        gestureIndicator.textContent = 'Click!';
+                        // No hand for this cursor - hide it
+                        cursors[i].classList.remove('active');
+                        lastPinchState[i] = false;
                     }
-                    
-                    pinchStartTime = null;
-                }
-                
-                if (!lastPinchState) {
-                    gestureIndicator.textContent = 'Pinch to click, hold 1.5s to drag';
                 }
             }
             
-            lastPinchState = isPinchingNow;
+            if (hands.length === 0) {
+                gestureIndicator.textContent = 'One hand: scroll/click | Two hands: zoom';
+            }
         }
 
         const mediaPipeHandler = new MediaPipeHandler(onMediaPipeResults);
