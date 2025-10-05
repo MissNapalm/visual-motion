@@ -23,14 +23,12 @@
             border-bottom: 1px solid #ccc;
             display: flex;
             flex-direction: column;
-            -webkit-app-region: drag;
         }
 
         .window-controls {
             display: flex;
             gap: 8px;
             padding: 12px;
-            -webkit-app-region: no-drag;
         }
 
         .control {
@@ -48,7 +46,6 @@
             align-items: center;
             gap: 8px;
             padding: 8px 12px;
-            -webkit-app-region: no-drag;
         }
 
         .nav-btn {
@@ -87,15 +84,12 @@
             flex: 1;
             height: calc(100vh - 100px);
             position: relative;
-            z-index: 1;
         }
 
-        webview {
+        iframe {
             width: 100%;
             height: 100%;
             border: none;
-            position: relative;
-            z-index: 1;
         }
 
         .camera-overlay {
@@ -162,92 +156,54 @@
             z-index: 1000;
         }
 
-
-
         .cursor-dot {
             position: fixed;
             width: 20px;
             height: 20px;
             border-radius: 50%;
-            background: red;
+            background: rgba(255, 0, 0, 0.3);
+            border: 3px solid red;
             transform: translate(-50%, -50%);
             pointer-events: none;
             z-index: 2100;
             display: none;
             box-shadow: 0 0 15px rgba(255, 0, 0, 0.8);
+            transition: all 0.1s ease;
         }
 
         .cursor-dot.active {
             display: block;
         }
 
-        @keyframes pulse {
-            0%, 100% { transform: translate(-50%, -50%) scale(1); }
-            50% { transform: translate(-50%, -50%) scale(1.2); }
+        .cursor-dot.pinching {
+            background: rgba(0, 255, 0, 0.5);
+            border-color: lime;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.9);
+            transform: translate(-50%, -50%) scale(1.5);
         }
 
-        #handOverlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 999999;
-            background: transparent;
-        }
-
-        .on-screen-keyboard {
+        .click-indicator {
             position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            background: rgba(30, 30, 30, 0.95);
-            padding: 20px;
-            z-index: 2000;
-            box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: rgba(255, 255, 0, 0.6);
+            border: 4px solid yellow;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 2200;
+            display: none;
+            box-shadow: 0 0 25px rgba(255, 255, 0, 1);
+            animation: clickPulse 0.6s ease-out;
         }
 
-        .keyboard-row {
-            display: flex;
-            justify-content: center;
-            gap: 8px;
-            margin-bottom: 8px;
+        .click-indicator.active {
+            display: block;
         }
 
-        .keyboard-key {
-            min-width: 60px;
-            height: 50px;
-            background: #4a4a4a;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 18px;
-            cursor: pointer;
-            transition: all 0.1s;
-        }
-
-        .keyboard-key:hover {
-            background: #5a5a5a;
-            transform: scale(1.05);
-        }
-
-        .keyboard-key:active {
-            background: #3a3a3a;
-            transform: scale(0.95);
-        }
-
-        .key-space {
-            min-width: 200px;
-        }
-
-        .key-action {
-            background: #4285f4;
-            min-width: 100px;
-        }
-
-        .key-action:hover {
-            background: #5295ff;
+        @keyframes clickPulse {
+            0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(2); opacity: 0; }
         }
     </style>
 </head>
@@ -269,7 +225,7 @@
                     type="text" 
                     id="addressBar" 
                     class="address-bar" 
-                    placeholder="Enter URL or search..."
+                    placeholder="Enter URL..."
                     value="test.html"
                 >
             </div>
@@ -279,12 +235,7 @@
     </div>
 
     <div class="browser-content">
-        <webview 
-            id="webview" 
-            src=""
-            allowpopups
-        ></webview>
-        <canvas id="handOverlay"></canvas>
+        <iframe id="webview" src="" allowfullscreen sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
     </div>
 
     <div class="camera-overlay" id="cameraOverlay">
@@ -303,6 +254,9 @@
     <div class="cursor-dot" id="clickDot1"></div>
     <div class="cursor-dot" id="clickDot2"></div>
 
+    <div class="click-indicator" id="clickIndicator1"></div>
+    <div class="click-indicator" id="clickIndicator2"></div>
+
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
@@ -312,25 +266,9 @@
         
         class GestureController {
             constructor() {
-                this.smoothingFactor = 0.7;
-                this.prevPositions = new Map();
                 this.pinchFrameCount = 0;
                 this.pinchThreshold = 3;
                 this.pinchDistanceThreshold = 0.06;
-                this.pointFrameCount = new Map();
-                this.pointThreshold = 5;
-            }
-
-            smooth(key, value) {
-                if (!this.prevPositions.has(key)) {
-                    this.prevPositions.set(key, value);
-                    return value;
-                }
-                
-                const prev = this.prevPositions.get(key);
-                const smoothed = this.smoothingFactor * value + (1 - this.smoothingFactor) * prev;
-                this.prevPositions.set(key, smoothed);
-                return smoothed;
             }
 
             distance(p1, p2) {
@@ -358,237 +296,6 @@
                     y: thumbTip.y
                 };
             }
-
-            detectSwipe(landmarks) {
-                const wrist = landmarks[0];
-                const middleFinger = landmarks[12];
-                const dx = middleFinger.x - wrist.x;
-                
-                if (Math.abs(dx) > 0.3) {
-                    return dx > 0 ? 'right' : 'left';
-                }
-                return null;
-            }
-
-            isPointingUp(landmarks) {
-                const indexTip = landmarks[8];
-                const indexBase = landmarks[5];
-                const middleTip = landmarks[12];
-                const ringTip = landmarks[16];
-                const pinkyTip = landmarks[20];
-                const wrist = landmarks[0];
-                
-                const indexUp = indexTip.y < indexBase.y - 0.1;
-                const othersCurled = 
-                    middleTip.y > wrist.y - 0.05 &&
-                    ringTip.y > wrist.y - 0.05 &&
-                    pinkyTip.y > wrist.y - 0.05;
-                
-                return indexUp && othersCurled;
-            }
-
-            isTwoFingersUp(landmarks) {
-                const indexTip = landmarks[8];
-                const indexBase = landmarks[5];
-                const middleTip = landmarks[12];
-                const middleBase = landmarks[9];
-                const ringTip = landmarks[16];
-                const pinkyTip = landmarks[20];
-                const wrist = landmarks[0];
-                
-                const indexUp = indexTip.y < indexBase.y - 0.1;
-                const middleUp = middleTip.y < middleBase.y - 0.1;
-                const othersCurled = 
-                    ringTip.y > wrist.y - 0.05 &&
-                    pinkyTip.y > wrist.y - 0.05;
-                
-                return indexUp && middleUp && othersCurled;
-            }
-
-            getPointingPosition(landmarks) {
-                const indexTip = landmarks[8];
-                return {
-                    x: 1 - indexTip.x,
-                    y: indexTip.y
-                };
-            }
-
-            isGestureStable(handIdx, gestureName, isActive) {
-                const key = `${handIdx}-${gestureName}`;
-                
-                if (!this.pointFrameCount.has(key)) {
-                    this.pointFrameCount.set(key, 0);
-                }
-                
-                if (isActive) {
-                    this.pointFrameCount.set(key, this.pointFrameCount.get(key) + 1);
-                } else {
-                    this.pointFrameCount.set(key, 0);
-                }
-                
-                return this.pointFrameCount.get(key) >= this.pointThreshold;
-            }
-        }
-
-        class BrowserController {
-            constructor() {
-                this.webview = document.getElementById('webview');
-                this.addressBar = document.getElementById('addressBar');
-                this.backBtn = document.getElementById('backBtn');
-                this.forwardBtn = document.getElementById('forwardBtn');
-                this.reloadBtn = document.getElementById('reloadBtn');
-                
-                this.scale = 1;
-                this.lastPinchPos = null;
-                this.lastPinchDist = null;
-                this.overlayInjected = false;
-                
-                this.velocity = { x: 0, y: 0 };
-                this.lastMoveTime = 0;
-                this.scrollHistory = [];
-                
-                this.lastLeftClick = false;
-                this.lastRightClick = false;
-                
-                this.setupEventListeners();
-            }
-
-            setupEventListeners() {
-                this.addressBar.addEventListener('keypress', (e) => {
-                    if (e.key === 'Enter') {
-                        this.navigate(this.addressBar.value);
-                    }
-                });
-
-                this.backBtn.addEventListener('click', () => this.goBack());
-                this.forwardBtn.addEventListener('click', () => this.goForward());
-                this.reloadBtn.addEventListener('click', () => this.reload());
-
-                this.webview.addEventListener('did-navigate', (e) => {
-                    this.addressBar.value = e.url;
-                    this.overlayInjected = false;
-                });
-
-                this.webview.addEventListener('did-navigate-in-page', (e) => {
-                    this.addressBar.value = e.url;
-                });
-
-                this.webview.addEventListener('dom-ready', () => {
-                    console.log('Webview DOM ready, injecting overlay...');
-                    setTimeout(() => {
-                        this.injectHandOverlay();
-                    }, 500);
-                });
-            }
-
-            injectHandOverlay() {
-                if (this.overlayInjected) return;
-                
-                console.log('Injecting hand overlay into webview...');
-                
-                this.webview.executeJavaScript(`
-                    console.log('Starting injection...');
-                    
-                    const oldOverlay = document.getElementById('gesture-hand-overlay');
-                    if (oldOverlay) oldOverlay.remove();
-                    
-                    const overlay = document.createElement('canvas');
-                    overlay.id = 'gesture-hand-overlay';
-                    overlay.style.position = 'fixed';
-                    overlay.style.top = '0';
-                    overlay.style.left = '0';
-                    overlay.style.width = '100vw';
-                    overlay.style.height = '100vh';
-                    overlay.style.pointerEvents = 'none';
-                    overlay.style.zIndex = '999999';
-                    overlay.width = window.innerWidth;
-                    overlay.height = window.innerHeight;
-                    document.body.appendChild(overlay);
-                    
-                    console.log('Overlay canvas created:', overlay.width, 'x', overlay.height);
-                    
-                    const ctx = overlay.getContext('2d');
-                    
-                    window.addEventListener('resize', () => {
-                        overlay.width = window.innerWidth;
-                        overlay.height = window.innerHeight;
-                    });
-                    
-                    window.drawHands = function(handsData) {
-                        ctx.clearRect(0, 0, overlay.width, overlay.height);
-                        
-                        if (!handsData || handsData.length === 0) {
-                            return;
-                        }
-                        
-                        handsData.forEach((hand, idx) => {
-                            ctx.strokeStyle = '#0088FF';
-                            ctx.lineWidth = 4;
-                            hand.connections.forEach(conn => {
-                                ctx.beginPath();
-                                ctx.moveTo(conn.start.x, conn.start.y);
-                                ctx.lineTo(conn.end.x, conn.end.y);
-                                ctx.stroke();
-                            });
-                            
-                            hand.landmarks.forEach(point => {
-                                ctx.fillStyle = '#00DDFF';
-                                ctx.beginPath();
-                                ctx.arc(point.x, point.y, 8, 0, 2 * Math.PI);
-                                ctx.fill();
-                                
-                                ctx.strokeStyle = '#FFFFFF';
-                                ctx.lineWidth = 2;
-                                ctx.stroke();
-                            });
-                        });
-                    };
-                    
-                    console.log('Hand overlay injected and ready!');
-                `).then(() => {
-                    console.log('Injection complete');
-                    this.overlayInjected = true;
-                }).catch(err => {
-                    console.error('Injection failed:', err);
-                });
-            }
-
-            drawHandsInWebview(handsData) {
-                if (!this.overlayInjected) {
-                    return;
-                }
-                
-                this.webview.executeJavaScript(`
-                    if (window.drawHands) {
-                        window.drawHands(${JSON.stringify(handsData)});
-                    }
-                `).catch(err => {
-                    console.error('Error drawing in webview:', err);
-                });
-            }
-
-            navigate(url) {
-                if (!url.startsWith('http://') && !url.startsWith('https://')) {
-                    url = 'https://' + url;
-                }
-                this.webview.src = url;
-            }
-
-            goBack() {
-                if (this.webview.canGoBack()) {
-                    this.webview.goBack();
-                }
-            }
-
-            goForward() {
-                if (this.webview.canGoForward()) {
-                    this.webview.goForward();
-                }
-            }
-
-            reload() {
-                this.webview.reload();
-            }
         }
 
         class MediaPipeHandler {
@@ -597,19 +304,14 @@
                 this.canvas = document.getElementById('canvas');
                 this.ctx = this.canvas.getContext('2d');
                 this.onResultsCallback = onResults;
-                this.frameCount = 0;
                 
                 this.initializeMediaPipe();
             }
 
             async initializeMediaPipe() {
                 try {
-                    console.log('Starting MediaPipe initialization...');
-                    
                     const hands = new Hands({
-                        locateFile: (file) => {
-                            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
-                        }
+                        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
                     });
 
                     hands.setOptions({
@@ -619,61 +321,26 @@
                         minTrackingConfidence: 0.5
                     });
 
-                    hands.onResults((results) => {
-                        this.processResults(results);
-                    });
+                    hands.onResults((results) => this.processResults(results));
 
-                    console.log('Requesting camera access...');
                     const camera = new Camera(this.video, {
-                        onFrame: async () => {
-                            await hands.send({ image: this.video });
-                        },
+                        onFrame: async () => await hands.send({ image: this.video }),
                         width: 640,
                         height: 480
                     });
 
                     await camera.start();
-                    
-                    await new Promise((resolve) => {
-                        const checkDimensions = () => {
-                            if (this.video.videoWidth > 0 && this.video.videoHeight > 0) {
-                                console.log('Video dimensions:', this.video.videoWidth, 'x', this.video.videoHeight);
-                                resolve();
-                            } else {
-                                setTimeout(checkDimensions, 100);
-                            }
-                        };
-                        checkDimensions();
-                    });
-                    
-                    console.log('Camera started successfully!');
-                    
-                    this.video.addEventListener('playing', () => {
-                        console.log('Video is playing!');
-                    });
-                    
-                    document.getElementById('gestureIndicator').textContent = 'Camera ready - show your hands!';
+                    document.getElementById('gestureIndicator').textContent = 'Ready!';
                 } catch (error) {
-                    console.error('MediaPipe initialization error:', error);
-                    document.getElementById('gestureIndicator').textContent = 'Error: ' + error.message;
+                    console.error('MediaPipe error:', error);
                 }
             }
 
             processResults(results) {
-                this.frameCount++;
                 this.canvas.width = this.video.videoWidth;
                 this.canvas.height = this.video.videoHeight;
                 
-                this.ctx.save();
                 this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                
-                this.ctx.fillStyle = 'lime';
-                this.ctx.font = 'bold 20px monospace';
-                this.ctx.fillText(`Frame: ${this.frameCount}`, 10, 30);
-                
-                this.ctx.strokeStyle = 'red';
-                this.ctx.lineWidth = 4;
-                this.ctx.strokeRect(0, 0, this.canvas.width, this.canvas.height);
                 
                 if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                     for (const landmarks of results.multiHandLandmarks) {
@@ -682,13 +349,7 @@
                         drawLandmarks(this.ctx, landmarks, 
                             { color: '#00FF00', lineWidth: 2, radius: 6 });
                     }
-                } else {
-                    this.ctx.fillStyle = 'yellow';
-                    this.ctx.font = '16px monospace';
-                    this.ctx.fillText('No hands detected', 10, 60);
                 }
-                
-                this.ctx.restore();
                 
                 if (this.onResultsCallback) {
                     this.onResultsCallback(results);
@@ -697,15 +358,21 @@
         }
 
         const gestureController = new GestureController();
-        const browserController = new BrowserController();
+        const webview = document.getElementById('webview');
         const clickDot1 = document.getElementById('clickDot1');
         const clickDot2 = document.getElementById('clickDot2');
+        const clickIndicator1 = document.getElementById('clickIndicator1');
+        const clickIndicator2 = document.getElementById('clickIndicator2');
         const gestureIndicator = document.getElementById('gestureIndicator');
 
         let lastPinchState = [false, false];
         let lastPinchX = [0, 0];
         let lastPinchY = [0, 0];
+        let hasScrolled = [false, false];
+        let pinchStartX = [0, 0];
+        let pinchStartY = [0, 0];
         let lastTwoHandDistance = null;
+        let currentZoom = 1;
 
         function onMediaPipeResults(results) {
             const hands = [];
@@ -724,118 +391,140 @@
                 });
             }
             
-            const webview = document.getElementById('webview');
             const rect = webview.getBoundingClientRect();
-            
-            // Update cursors for each hand
             const cursors = [clickDot1, clickDot2];
+            const clickIndicators = [clickIndicator1, clickIndicator2];
             
-            // Check if both hands are pinching (zoom gesture)
+            // Two-hand zoom
             if (hands.length === 2 && hands[0].isPinching && hands[1].isPinching) {
-                // Two-hand pinch zoom
-                const hand1X = hands[0].pinchX;
-                const hand1Y = hands[0].pinchY;
-                const hand2X = hands[1].pinchX;
-                const hand2Y = hands[1].pinchY;
-                
                 const distance = Math.sqrt(
-                    Math.pow(hand2X - hand1X, 2) + 
-                    Math.pow(hand2Y - hand1Y, 2)
+                    Math.pow(hands[1].pinchX - hands[0].pinchX, 2) + 
+                    Math.pow(hands[1].pinchY - hands[0].pinchY, 2)
                 );
                 
                 if (lastTwoHandDistance !== null) {
                     const distanceDelta = distance - lastTwoHandDistance;
                     const zoomFactor = 1 + (distanceDelta * 2);
+                    currentZoom = Math.max(0.5, Math.min(3, currentZoom * zoomFactor));
                     
-                    webview.setZoomFactor(webview.getZoomFactor() * zoomFactor);
+                    // Apply zoom via CSS transform
+                    try {
+                        const iframeDoc = webview.contentDocument;
+                        if (iframeDoc && iframeDoc.body) {
+                            iframeDoc.body.style.transform = `scale(${currentZoom})`;
+                            iframeDoc.body.style.transformOrigin = '0 0';
+                        }
+                    } catch (err) {
+                        console.error('Zoom error:', err);
+                    }
                     
-                    gestureIndicator.textContent = `Zooming... ${(webview.getZoomFactor() * 100).toFixed(0)}%`;
+                    gestureIndicator.textContent = `Zoom: ${(currentZoom * 100).toFixed(0)}%`;
                 }
                 
                 lastTwoHandDistance = distance;
                 
-                // Update both cursors
                 for (let i = 0; i < 2; i++) {
-                    const screenX = rect.left + hands[i].pinchX * rect.width;
-                    const screenY = rect.top + hands[i].pinchY * rect.height;
-                    cursors[i].style.left = screenX + 'px';
-                    cursors[i].style.top = screenY + 'px';
+                    cursors[i].style.left = (rect.left + hands[i].pinchX * rect.width) + 'px';
+                    cursors[i].style.top = (rect.top + hands[i].pinchY * rect.height) + 'px';
                     cursors[i].classList.add('active');
+                    cursors[i].classList.add('pinching');
                     lastPinchState[i] = true;
-                    lastPinchX[i] = hands[i].pinchX;
-                    lastPinchY[i] = hands[i].pinchY;
                 }
             } else {
-                // Single hand or no zoom
                 lastTwoHandDistance = null;
                 
                 for (let i = 0; i < 2; i++) {
                     if (i < hands.length) {
                         const hand = hands[i];
-                        const cursor = cursors[i];
                         
-                        const screenX = rect.left + hand.pinchX * rect.width;
-                        const screenY = rect.top + hand.pinchY * rect.height;
+                        cursors[i].style.left = (rect.left + hand.pinchX * rect.width) + 'px';
+                        cursors[i].style.top = (rect.top + hand.pinchY * rect.height) + 'px';
+                        cursors[i].classList.add('active');
                         
-                        cursor.style.left = screenX + 'px';
-                        cursor.style.top = screenY + 'px';
-                        cursor.classList.add('active');
-                        
-                        // Handle pinching
                         if (hand.isPinching) {
+                            cursors[i].classList.add('pinching');
+                            
                             if (lastPinchState[i]) {
-                                // Already pinching - calculate scroll delta
                                 const deltaX = (hand.pinchX - lastPinchX[i]) * rect.width;
                                 const deltaY = (hand.pinchY - lastPinchY[i]) * rect.height;
                                 
-                                // Scroll the page
-                                webview.executeJavaScript(`
-                                    window.scrollBy(${-deltaX}, ${-deltaY});
-                                `).catch(err => {
-                                    console.error('Scroll failed:', err);
-                                });
-                                
-                                gestureIndicator.textContent = 'Scrolling...';
+                                if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+                                    hasScrolled[i] = true;
+                                    
+                                    // Scroll iframe content
+                                    try {
+                                        const iframeWin = webview.contentWindow;
+                                        if (iframeWin) {
+                                            iframeWin.scrollBy(-deltaX, -deltaY);
+                                        }
+                                    } catch (err) {
+                                        console.error('Scroll error:', err);
+                                    }
+                                    
+                                    gestureIndicator.textContent = 'Scrolling...';
+                                }
                             } else {
-                                gestureIndicator.textContent = 'Pinch detected';
+                                hasScrolled[i] = false;
+                                pinchStartX[i] = hand.pinchX;
+                                pinchStartY[i] = hand.pinchY;
+                                
+                                // Show click indicator at pinch start position
+                                const indicatorX = rect.left + hand.pinchX * rect.width;
+                                const indicatorY = rect.top + hand.pinchY * rect.height;
+                                clickIndicators[i].style.left = indicatorX + 'px';
+                                clickIndicators[i].style.top = indicatorY + 'px';
+                                clickIndicators[i].classList.add('active');
+                                
+                                // Auto-hide after animation
+                                setTimeout(() => {
+                                    clickIndicators[i].classList.remove('active');
+                                }, 600);
                             }
                             
                             lastPinchState[i] = true;
                         } else {
-                            // Pinch released
-                            if (lastPinchState[i]) {
-                                // Click on release - use viewport coordinates (no zoom adjustment needed)
-                                const localX = lastPinchX[i] * rect.width;
-                                const localY = lastPinchY[i] * rect.height;
+                            cursors[i].classList.remove('pinching');
+                            
+                            if (lastPinchState[i] && !hasScrolled[i]) {
+                                const x = Math.round(pinchStartX[i] * rect.width);
+                                const y = Math.round(pinchStartY[i] * rect.height);
                                 
-                                console.log('CLICK at:', localX, localY);
+                                // Show click indicator where we're clicking
+                                const clickX = rect.left + pinchStartX[i] * rect.width;
+                                const clickY = rect.top + pinchStartY[i] * rect.height;
+                                clickIndicators[i].style.left = clickX + 'px';
+                                clickIndicators[i].style.top = clickY + 'px';
+                                clickIndicators[i].classList.add('active');
                                 
-                                webview.executeJavaScript(`
-                                    (function() {
-                                        const x = ${localX};
-                                        const y = ${localY};
-                                        
-                                        const element = document.elementFromPoint(x, y);
-                                        
-                                        if (element) {
-                                            console.log('Clicking element:', element.tagName);
-                                            element.click();
-                                        }
-                                    })();
-                                `).catch(err => {
-                                    console.error('Click failed:', err);
-                                });
+                                setTimeout(() => {
+                                    clickIndicators[i].classList.remove('active');
+                                }, 600);
                                 
-                                gestureIndicator.textContent = 'Click!';
+                                console.log('ATTEMPTING CLICK at:', x, y);
+                                
+                                // Direct access to iframe's document
+                                try {
+                                    const iframeDoc = webview.contentDocument || webview.contentWindow.document;
+                                    const el = iframeDoc.elementFromPoint(x, y);
+                                    console.log('Found element:', el);
+                                    if (el) {
+                                        el.click();
+                                        console.log('Clicked:', el.tagName);
+                                    }
+                                } catch (err) {
+                                    console.error('Click error:', err);
+                                }
+                                
+                                gestureIndicator.textContent = 'CLICK!';
                             }
                             
                             lastPinchState[i] = false;
+                            hasScrolled[i] = false;
                         }
                         
                         lastPinchX[i] = hand.pinchX;
                         lastPinchY[i] = hand.pinchY;
                     } else {
-                        // No hand for this cursor - hide it
                         cursors[i].classList.remove('active');
                         lastPinchState[i] = false;
                     }
@@ -843,16 +532,14 @@
             }
             
             if (hands.length === 0) {
-                gestureIndicator.textContent = 'One hand: scroll/click | Two hands: zoom';
+                gestureIndicator.textContent = '1 hand: scroll/click | 2 hands: zoom';
             }
         }
 
         const mediaPipeHandler = new MediaPipeHandler(onMediaPipeResults);
 
         window.addEventListener('DOMContentLoaded', () => {
-            const testUrl = window.location.href.replace('index.html', 'test.html');
-            document.getElementById('webview').src = testUrl;
-            console.log('Loading test page from:', testUrl);
+            webview.src = window.location.href.replace('index.html', 'test.html');
         });
 
         document.getElementById('toggleCamera').addEventListener('click', () => {
@@ -860,7 +547,17 @@
             overlay.style.display = overlay.style.display === 'none' ? 'block' : 'none';
         });
 
-        console.log('Gesture Browser initialized!');
+        document.getElementById('addressBar').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                let url = e.target.value;
+                if (!url.startsWith('http')) url = 'https://' + url;
+                webview.src = url;
+            }
+        });
+
+        document.getElementById('backBtn').addEventListener('click', () => webview.canGoBack() && webview.goBack());
+        document.getElementById('forwardBtn').addEventListener('click', () => webview.canGoForward() && webview.goForward());
+        document.getElementById('reloadBtn').addEventListener('click', () => webview.reload());
     </script>
 </body>
 </html>
