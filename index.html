@@ -45,6 +45,21 @@
     .crosshair.pinch{transform:translate(-50%,-50%) scale(.85)}
     .crosshair.pulse .ring{animation:chPulse .45s ease-out}
     @keyframes chPulse{0%{transform:scale(1);opacity:1}100%{transform:scale(1.6);opacity:0}}
+
+    /* Big corner buttons (easy to pinch) */
+    .corner-btn{
+      position:fixed; top:10px; width:120px; height:120px;
+      display:flex; align-items:center; justify-content:center;
+      background:rgba(0,0,0,.35); border:2px solid rgba(255,255,255,.45);
+      color:#fff; font-size:56px; border-radius:16px;
+      backdrop-filter: blur(6px);
+      user-select:none; cursor:pointer; z-index:2500;
+      transition: transform .06s ease, background .2s ease, box-shadow .2s ease;
+    }
+    .corner-btn:hover{ background:rgba(0,0,0,.45); box-shadow:0 8px 28px rgba(0,0,0,.35); }
+    .corner-btn:active, .corner-btn.active{ transform:scale(.96); background:rgba(0,0,0,.55); }
+    #cornerBackBtn{ left:10px; }
+    #cornerFwdBtn{ right:10px; }
   </style>
 </head>
 <body>
@@ -62,8 +77,22 @@
   </div>
 
   <div class="browser-content">
-    <webview id="webview" src="https://www.reddit.com" allowpopups webpreferences="contextIsolation=yes, nodeIntegration=no"></webview>
+    <!-- Debounced, partitioned webview -->
+    <webview
+      id="webview"
+      src="https://www.reddit.com"
+      allowpopups
+      allow="autoplay; fullscreen *; picture-in-picture *"
+      partition="persist:main"
+      useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+      webpreferences="contextIsolation=yes, nodeIntegration=no"
+      style="position:absolute; inset:0; width:100%; height:100%; background:#fff; border:none"
+    ></webview>
   </div>
+
+  <!-- Big corner buttons (overlay above webview) -->
+  <div id="cornerBackBtn" class="corner-btn" aria-label="Back">⟵</div>
+  <div id="cornerFwdBtn"  class="corner-btn" aria-label="Forward">⟶</div>
 
   <div class="camera-overlay" id="cameraOverlay">
     <div class="camera-header"><span>Hand Tracking</span><button id="toggleCamera">📷</button></div>
@@ -93,34 +122,96 @@
         this.smooth = [{x:0,y:0},{x:0,y:0}];
         this.lastOut = [{x:0,y:0},{x:0,y:0}];
         this.lastClickAt = 0;
-        this.THRESH_FRAMES = 3;      // frames to confirm pinch
-        this.DIST_THRESH  = 0.06;    // thumb-index distance for pinch
-        this.ALPHA        = 0.35;    // EMA smoothing
-        this.DEADZONE_PIX = 6;       // ignore movement smaller than this (viewport px)
-        this.COOLDOWN_MS  = 180;     // avoid accidental double clicks
+        this.THRESH_FRAMES = 3;
+        this.DIST_THRESH  = 0.06;
+        this.ALPHA        = 0.35;
+        this.DEADZONE_PIX = 6;
+        this.COOLDOWN_MS  = 180;
       }
       _dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
-      isPinching(lm, idx){
-        const pinchNow = this._dist(lm[4], lm[8]) < this.DIST_THRESH;
-        this.pinchFrames[idx] = pinchNow ? this.pinchFrames[idx]+1 : 0;
-        return this.pinchFrames[idx] >= this.THRESH_FRAMES;
-      }
+      isPinching(lm, idx){ const pinchNow = this._dist(lm[4], lm[8]) < this.DIST_THRESH; this.pinchFrames[idx] = pinchNow ? this.pinchFrames[idx]+1 : 0; return this.pinchFrames[idx] >= this.THRESH_FRAMES; }
       tip(lm){ return { x: lm[4].x, y: lm[4].y }; }
-      ema(idx, cur){ // normalized coords -> smoothed
-        const s = this.smooth[idx];
-        if (s.x === 0 && s.y === 0) { this.smooth[idx] = {...cur}; return cur; }
-        s.x = s.x + this.ALPHA * (cur.x - s.x);
-        s.y = s.y + this.ALPHA * (cur.y - s.y);
-        return { x:s.x, y:s.y };
+      ema(idx, cur){ const s=this.smooth[idx]; if(s.x===0&&s.y===0){ this.smooth[idx]={...cur}; return cur; } s.x += this.ALPHA*(cur.x-s.x); s.y += this.ALPHA*(cur.y-s.y); return {x:s.x,y:s.y}; }
+      withinDeadzone(idx, pxX, pxY){ const p=this.lastOut[idx]; return Math.hypot(pxX-p.x, pxY-p.y) < this.DEADZONE_PIX; }
+      rememberOut(idx, pxX, pxY){ this.lastOut[idx]={x:pxX,y:pxY}; }
+      canClick(){ return (performance.now()-this.lastClickAt) > this.COOLDOWN_MS; }
+      markClicked(){ this.lastClickAt = performance.now(); }
+    }
+
+    /* ---------- Index-finger-only gesture detector ---------- */
+    class IndexOnly {
+      constructor() {
+        this.frames = 0;
+        this.ACTIVE_FRAMES = 8;
+        this.MARGIN = 0.02;
+        this.cooldownAt = 0;
+        this.COOLDOWN_MS = 1500; // increased
+        this.active = false;
       }
-      withinDeadzone(idx, pxX, pxY) {
-        const p = this.lastOut[idx];
-        const dx = pxX - p.x, dy = pxY - p.y;
-        return Math.hypot(dx, dy) < this.DEADZONE_PIX;
+      extended(lm, tip, pip){ return (lm[tip].y + this.MARGIN) < lm[pip].y; } // smaller y = higher
+      curled(lm, tip, pip){   return (lm[tip].y) > (lm[pip].y - this.MARGIN); }
+      isActivePose(lm){
+        const indexUp   = this.extended(lm, 8, 6);
+        const middleDn  = this.curled(lm, 12, 10);
+        const ringDn    = this.curled(lm, 16, 14);
+        const pinkyDn   = this.curled(lm, 20, 18);
+        return indexUp && middleDn && ringDn && pinkyDn;
       }
-      rememberOut(idx, pxX, pxY) { this.lastOut[idx] = {x:pxX, y:pxY}; }
-      canClick() { return (performance.now() - this.lastClickAt) > this.COOLDOWN_MS; }
-      markClicked() { this.lastClickAt = performance.now(); }
+      update(lm){
+        const now = performance.now();
+        if (now - this.cooldownAt < this.COOLDOWN_MS) { this.frames=0; this.active=false; return false; }
+        if (this.isActivePose(lm)) {
+          this.frames++;
+          if (!this.active && this.frames >= this.ACTIVE_FRAMES) { this.active = true; return true; }
+        } else { this.frames=0; this.active=false; }
+        return false;
+      }
+      armCooldown(){ this.cooldownAt = performance.now(); this.active=false; this.frames=0; }
+    }
+
+    /* ---------- "L" pose (index up + thumb out) -> back/forward ---------- */
+    class LGesture {
+      constructor() {
+        this.frames = [0,0];
+        this.cooldownAt = [0,0];
+        this.ACTIVE_FRAMES = 6;
+        this.COOLDOWN_MS = 900;
+        this.MARGIN_Y = 0.02;
+        this.MARGIN_X = 0.04;
+      }
+      extendedY(lm, tip, pip){ return (lm[tip].y + this.MARGIN_Y) < lm[pip].y; }
+      curledY(lm, tip, pip){   return (lm[tip].y) > (lm[pip].y - this.MARGIN_Y); }
+      update(i, lm, handed) {
+        const now = performance.now();
+        if (now - this.cooldownAt[i] < this.COOLDOWN_MS) { this.frames[i]=0; return null; }
+
+        const indexUp  = this.extendedY(lm, 8, 6);
+        const middleDn = this.curledY(lm, 12,10);
+        const ringDn   = this.curledY(lm, 16,14);
+        const pinkyDn  = this.curledY(lm, 20,18);
+
+        const thumbTipX = lm[4].x;
+        const indexMCPX = lm[5].x;
+        const thumbOutLeft  = thumbTipX < (indexMCPX - this.MARGIN_X);
+        const thumbOutRight = thumbTipX > (indexMCPX + this.MARGIN_X);
+
+        const pose = indexUp && middleDn && ringDn && pinkyDn && (thumbOutLeft || thumbOutRight);
+        if (!pose) { this.frames[i]=0; return null; }
+
+        this.frames[i]++;
+        if (this.frames[i] >= this.ACTIVE_FRAMES) {
+          this.frames[i]=0;
+          this.cooldownAt[i]=now;
+
+          if (handed === 'Left'  && thumbOutLeft)  return 'back';
+          if (handed === 'Right' && thumbOutRight) return 'forward';
+          if (!handed) {
+            if (thumbOutLeft)  return 'back';
+            if (thumbOutRight) return 'forward';
+          }
+        }
+        return null;
+      }
     }
 
     /* ---------- MediaPipe (skeleton overlay only) ---------- */
@@ -139,7 +230,7 @@
           hands.onResults(r => this.process(r));
           const camera = new Camera(this.video, { onFrame: async () => hands.send({ image:this.video }), width:640, height:480 });
           await camera.start();
-          document.getElementById('gestureIndicator').textContent = 'Pinch-to-click + crosshairs enabled';
+          document.getElementById('gestureIndicator').textContent = 'Pinch=click/drag • L(left)=Back • L(right)=Forward • index→YouTube';
         } catch (e) { console.error('MediaPipe init error:', e); }
       }
       process(results) {
@@ -159,93 +250,192 @@
     // ---------- App state ----------
     const webview = document.getElementById('webview');
     const indicator = document.getElementById('gestureIndicator');
-    const crosshairEls = [document.getElementById('crosshair1'), document.getElementById('crosshair2')];
+    const ch = [document.getElementById('crosshair1'), document.getElementById('crosshair2')];
     const pinch = new PinchClick();
+    const indexOnlyLeft  = new IndexOnly();
+    const indexOnlyRight = new IndexOnly();
+    const lGesture = new LGesture();
+
+    // Corner buttons
+    const cornerBackBtn = document.getElementById('cornerBackBtn');
+    const cornerFwdBtn  = document.getElementById('cornerFwdBtn');
+
+    // --------- Debounced navigation helpers ---------
+    let navLock = false;
+    function sameOrigin(u1, u2) {
+      try { return new URL(u1).origin === new URL(u2).origin; } catch { return false; }
+    }
+    function navigateOnce(url) {
+      if (navLock) return;
+      const current = webview.getURL?.() || document.getElementById('addressBar').value;
+      if (current && sameOrigin(current, url)) return; // already on that site
+      navLock = true;
+      try { webview.loadURL(url); } catch { setTimeout(() => navLock = false, 500); }
+    }
+
+    // Pan state per hand
+    const panLast = [{x:0,y:0},{x:0,y:0}];
+    const hasPanned = [false,false];
+    const PAN_MOVE_THR = 2;     // px before we consider it a pan step
+    const SCROLL_SCALE = 1.0;   // hand px -> wheel px
 
     // Crosshair helpers
-    function showCH(i,x,y){ const el=crosshairEls[i]; el.style.left=x+'px'; el.style.top=y+'px'; el.classList.add('visible'); }
-    function moveCH(i,x,y){ const el=crosshairEls[i]; el.style.left=x+'px'; el.style.top=y+'px'; }
-    function setCHPinch(i,on){ crosshairEls[i].classList.toggle('pinch', !!on); }
-    function pulseCH(i){ const el=crosshairEls[i]; el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse'); }
-    function hideCH(i){ crosshairEls[i].classList.remove('visible','pinch','pulse'); }
+    function showCH(i,x,y){ const el=ch[i]; el.style.left=x+'px'; el.style.top=y+'px'; el.classList.add('visible'); }
+    function moveCH(i,x,y){ const el=ch[i]; el.style.left=x+'px'; el.style.top=y+'px'; }
+    function setCHPinch(i,on){ ch[i].classList.toggle('pinch', !!on); }
+    function pulseCH(i){ const el=ch[i]; el.classList.remove('pulse'); void el.offsetWidth; el.classList.add('pulse'); }
+    function hideCH(i){ ch[i].classList.remove('visible','pinch','pulse'); }
 
-    // Reliable native click via Electron (reaches iframes like YouTube)
+    // Native mouse events
     function nativeClick(vx, vy) {
-      // Clamp to viewport
       const rect = webview.getBoundingClientRect();
       const x = Math.max(0, Math.min(rect.width  - 1, Math.round(vx)));
       const y = Math.max(0, Math.min(rect.height - 1, Math.round(vy)));
-
       try {
         webview.focus();
-        // small pre-move helps some UIs
-        webview.sendInputEvent({ type: 'mouseMove', x, y, movementX: 0, movementY: 0 });
-        webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
-        webview.sendInputEvent({ type: 'mouseUp',   x, y, button: 'left', clickCount: 1 });
+        webview.sendInputEvent({ type:'mouseMove', x, y, movementX:0, movementY:0 });
+        webview.sendInputEvent({ type:'mouseDown', x, y, button:'left', clickCount:1 });
+        webview.sendInputEvent({ type:'mouseUp',   x, y, button:'left', clickCount:1 });
         return true;
-      } catch (e) {
-        console.error('nativeClick failed', e);
-        return false;
-      }
+      } catch (e) { console.error('nativeClick failed', e); return false; }
+    }
+    function nativeScroll(vx, vy, dX, dY) {
+      const rect = webview.getBoundingClientRect();
+      const x = Math.max(0, Math.min(rect.width  - 1, Math.round(vx)));
+      const y = Math.max(0, Math.min(rect.height - 1, Math.round(vy)));
+      try {
+        webview.focus();
+        webview.sendInputEvent({
+          type:'mouseWheel',
+          x, y,
+          deltaX: Math.round(dX),
+          deltaY: Math.round(dY),
+          canScroll: true,
+          hasPreciseScrollingDeltas: true
+        });
+        return true;
+      } catch (e) { console.error('nativeScroll failed', e); return false; }
     }
 
-    // Always-on crosshairs + stabilized pinch-to-click
+    // Helpers for corner button visual press
+    function pressCorner(el){
+      el.classList.add('active');
+      setTimeout(()=>el.classList.remove('active'), 140);
+    }
+
+    // Allow normal mouse/touch clicks on big buttons
+    cornerBackBtn.addEventListener('click', () => { if (webview.canGoBack()) { webview.goBack(); indicator.textContent='◀ Back'; } });
+    cornerFwdBtn.addEventListener('click',  () => { if (webview.canGoForward()) { webview.goForward(); indicator.textContent='Forward ▶'; } });
+
+    // Always-on crosshairs + pinch (drag to pan, release to click if not dragged) + gestures
     function onResults(results) {
       const rect = webview.getBoundingClientRect();
       const hands = results.multiHandLandmarks || [];
+      const handedness = results.multiHandedness || []; // [{label:'Left'|'Right', score:...}, ...]
 
       for (let i=0;i<2;i++){
         const lmSrc = hands[i];
         if (!lmSrc) { if (pinch.wasPinching[i]) pulseCH(i); hideCH(i); pinch.wasPinching[i]=false; continue; }
 
-        // Mirror X to match mirrored camera preview
+        // Mirror X to match user's mirrored view
         const lm = lmSrc.map(p => ({...p, x: 1 - p.x}));
-        // Smoothed thumb tip
+        const handLabel = handedness[i]?.label || '';
+
+        // ----- Always-on crosshair following thumb (smoothed) -----
         const rawTip = pinch.tip(lm);
         const tip = pinch.ema(i, rawTip);
-
-        // Map to webview viewport px
-        let vx = tip.x * rect.width;
-        let vy = tip.y * rect.height;
-
-        // Deadzone to remove micro jitter for crosshair positioning
-        if (pinch.withinDeadzone(i, vx, vy)) {
-          vx = pinch.lastOut[i].x;
-          vy = pinch.lastOut[i].y;
-        } else {
-          pinch.rememberOut(i, vx, vy);
-        }
-
+        let vx = tip.x * rect.width, vy = tip.y * rect.height;
+        if (pinch.withinDeadzone(i, vx, vy)) { vx = pinch.lastOut[i].x; vy = pinch.lastOut[i].y; } else { pinch.rememberOut(i, vx, vy); }
         const sx = rect.left + vx, sy = rect.top + vy;
-        if (!crosshairEls[i].classList.contains('visible')) showCH(i, sx, sy); else moveCH(i, sx, sy);
+        if (!ch[i].classList.contains('visible')) showCH(i, sx, sy); else moveCH(i, sx, sy);
 
-        // Pinch logic
+        // ----- Pinch detection (click or pan) -----
         const isPinch = pinch.isPinching(lm, i);
 
         if (isPinch && !pinch.wasPinching[i]) {
-          // Pinch start
-          pinch.pinchStart[i] = { x: vx/rect.width, y: vy/rect.height }; // store normalized start
+          // Pinch start -> prep for pan & potential click
+          pinch.pinchStart[i] = { x: vx/rect.width, y: vy/rect.height };
+          panLast[i] = { x: vx, y: vy };
+          hasPanned[i] = false;
           setCHPinch(i, true);
-          indicator.textContent = 'Pinching…';
+          indicator.textContent = 'Pinching… (drag to scroll)';
+        } else if (isPinch && pinch.wasPinching[i]) {
+          // Pinch drag -> translate to mouseWheel deltas
+          const dx = vx - panLast[i].x;
+          const dy = vy - panLast[i].y;
+
+          if (Math.abs(dx) > PAN_MOVE_THR || Math.abs(dy) > PAN_MOVE_THR) {
+            hasPanned[i] = true;
+            const wheelX = -dx * SCROLL_SCALE;
+            const wheelY = -dy * SCROLL_SCALE;
+            nativeScroll(vx, vy, wheelX, wheelY);
+            panLast[i] = { x: vx, y: vy };
+            indicator.textContent = 'PANNING…';
+          }
         } else if (!isPinch && pinch.wasPinching[i]) {
-          // Pinch release -> click at stored start (stable)
+          // Pinch released -> if we panned, do NOT click.
           setCHPinch(i, false);
           pulseCH(i);
 
-          if (pinch.canClick()) {
+          // Where did we release (page coords)?
+          const releaseGX = rect.left + vx;  // using current thumb pos (more intuitive)
+          const releaseGY = rect.top  + vy;
+          const hit = document.elementFromPoint(Math.round(releaseGX), Math.round(releaseGY));
+
+          // If over our big corner buttons, trigger them instead of webview click
+          if (!hasPanned[i] && hit) {
+            const onBack = hit.closest?.('#cornerBackBtn');
+            const onFwd  = hit.closest?.('#cornerFwdBtn');
+            if (onBack) {
+              pressCorner(cornerBackBtn);
+              if (webview.canGoBack()) webview.goBack();
+              indicator.textContent = '◀ Back';
+              pinch.wasPinching[i] = false;
+              continue; // skip webview click
+            }
+            if (onFwd) {
+              pressCorner(cornerFwdBtn);
+              if (webview.canGoForward()) webview.goForward();
+              indicator.textContent = 'Forward ▶';
+              pinch.wasPinching[i] = false;
+              continue; // skip webview click
+            }
+          }
+
+          // Otherwise: click inside webview (at pinch START to reduce jitter)
+          if (!hasPanned[i] && pinch.canClick()) {
             pinch.markClicked();
-            const clickVx = pinch.pinchStart[i].x * rect.width;
-            const clickVy = pinch.pinchStart[i].y * rect.height;
-            const ok = nativeClick(clickVx, clickVy);
+            const cx = pinch.pinchStart[i].x * rect.width;
+            const cy = pinch.pinchStart[i].y * rect.height;
+            const ok = nativeClick(cx, cy);
             indicator.textContent = ok ? 'CLICK!' : 'Click failed';
-            setTimeout(() => { indicator.textContent = 'Pinch-to-click + crosshairs enabled'; }, ok ? 400 : 800);
+            setTimeout(() => { indicator.textContent = 'Gestures ready: pinch=click/drag • L(left)=Back • L(right)=Forward • index→YouTube'; }, ok ? 400 : 800);
+          } else {
+            setTimeout(() => { indicator.textContent = 'Gestures ready: pinch=click/drag • L(left)=Back • L(right)=Forward • index→YouTube'; }, 300);
+          }
+        }
+        pinch.wasPinching[i] = isPinch;
+
+        // ----- "L" gesture: Back/Forward (only when NOT pinching to avoid conflicts)
+        if (!isPinch) {
+          const navAction = lGesture.update(i, lm, handLabel);
+          if (navAction === 'back') {
+            if (webview.canGoBack()) { webview.goBack(); indicator.textContent = '◀︎ Back'; }
+          } else if (navAction === 'forward') {
+            if (webview.canGoForward()) { webview.goForward(); indicator.textContent = 'Forward ▶︎'; }
           }
         }
 
-        pinch.wasPinching[i] = isPinch;
+        // ----- Index-only gesture (either hand) → open YouTube (debounced)
+        const idxDetector = (i === 0) ? indexOnlyLeft : indexOnlyRight;
+        if (idxDetector.update(lm)) {
+          navigateOnce('https://www.youtube.com');
+          indicator.textContent = 'Opening YouTube…';
+          idxDetector.armCooldown();
+        }
       }
 
-      if (!hands.length) { hideCH(0); hideCH(1); indicator.textContent = 'Show hands (crosshairs follow thumbs; pinch to click)'; }
+      if (!hands.length) { hideCH(0); hideCH(1); indicator.textContent = 'Show hands: pinch=click/drag • L(left)=Back • L(right)=Forward • index→YouTube'; }
     }
 
     // Start MediaPipe
@@ -254,7 +444,7 @@
     // ----- Browser chrome wiring -----
     const addressBar = document.getElementById('addressBar');
     function resolveUrl(v){ v=(v||'').trim(); if(!v) return ''; if(v.startsWith('http://')||v.startsWith('https://')) return v; if(v.endsWith('.html')||v.startsWith('./')||v.startsWith('/')) return v; return 'https://'+v; }
-    addressBar.addEventListener('keypress', (e) => { if (e.key==='Enter'){ const url=resolveUrl(e.target.value); if(url) webview.loadURL(url); }});
+    addressBar.addEventListener('keypress', (e) => { if (e.key==='Enter'){ const url=resolveUrl(e.target.value); if(url) navigateOnce(url); }});
     document.getElementById('reloadBtn').addEventListener('click', () => webview.reload());
     document.getElementById('backBtn').addEventListener('click', () => webview.canGoBack() && webview.goBack());
     document.getElementById('forwardBtn').addEventListener('click', () => webview.canGoForward() && webview.goForward());
@@ -267,10 +457,21 @@
       overlay.style.display = overlay.style.display==='none' ? 'block' : 'none';
     });
 
-    // Keep address bar synced
+    // Keep address bar synced + manage nav lock
     function setAddressBar(url){ addressBar.value = url; }
+    webview.addEventListener('did-start-loading', () => { /* keep lock */ });
+    webview.addEventListener('did-stop-loading', () => { navLock = false; });
+
     webview.addEventListener('did-navigate', (e) => setAddressBar(e.url));
     webview.addEventListener('did-navigate-in-page', (e) => setAddressBar(e.url));
+
+    // Ignore harmless ERR_ABORTED (-3) and release lock
+    webview.addEventListener('did-fail-load', (e) => {
+      if (e.errorCode !== -3) {
+        console.warn('Navigation failed:', e.errorCode, e.errorDescription, e.validatedURL);
+      }
+      navLock = false;
+    });
   </script>
 </body>
 </html>
