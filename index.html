@@ -22,11 +22,11 @@
     .url:focus{border-color:#4285f4}
 
     /* Webview */
-    webview{position:absolute; inset:100px 0 0 0; width:100%; height:calc(100vh - 100px); background:#fff; border:none}
+    webview{position:absolute; inset:100px 0 100px 0; width:100%; height:calc(100vh - 200px); background:#fff; border:none}
 
     /* Camera overlay */
-    .cam{position:fixed; top:100px; right:20px; width:320px; height:240px; background:rgba(0,0,0,.9); border-radius:12px; overflow:hidden; box-shadow:0 8px 32px rgba(0,0,0,.4); z-index:1000}
-    .cam-hdr{position:absolute; top:0; left:0; right:0; background:rgba(0,0,0,.8); color:#fff; padding:8px 12px; display:flex; justify-content:space-between; font-size:12px; z-index:1}
+    .cam{position:fixed; top:100px; right:20px; width:320px; height:240px; background:rgba(0,0,0,.9); border-radius:12px; overflow:hidden; box-shadow:0 8px 32px rgba(0,0,0,.4); z-index:1000; pointer-events:none}
+    .cam-hdr{position:absolute; top:0; left:0; right:0; background:rgba(0,0,0,.8); color:#fff; padding:8px 12px; display:flex; justify-content:space-between; font-size:12px; z-index:1; pointer-events:auto}
     .cam-toggle{background:none; border:none; cursor:pointer; font-size:16px; color:#fff}
     #video{width:100%; height:100%; object-fit:cover; transform:scaleX(-1)}
     #canvas{position:absolute; inset:0; transform:scaleX(-1)}
@@ -35,7 +35,7 @@
     .hud{position:fixed; bottom:20px; left:20px; background:rgba(0,0,0,.8); color:#fff; padding:12px 20px; border-radius:8px; font-size:14px; z-index:1200}
 
     /* Crosshairs */
-    .cross{position:fixed; width:28px; height:28px; transform:translate(-50%,-50%); z-index:2000; pointer-events:none; display:none; transition:transform .06s}
+    .cross{position:fixed; width:28px; height:28px; transform:translate(-50%,-50%); z-index:3000; pointer-events:none; display:none; transition:transform .06s}
     .cross.on{display:block}
     .cross .ring{position:absolute; inset:0; border:3px solid var(--c); border-radius:50%; box-shadow:0 0 18px var(--g), inset 0 0 6px var(--g); background:var(--bg)}
     .cross .h,.cross .v{position:absolute; background:var(--c); filter:drop-shadow(0 0 6px var(--g))}
@@ -48,11 +48,11 @@
     @keyframes pulse{0%{transform:scale(1);opacity:1}100%{transform:scale(1.6);opacity:0}}
 
     /* Corner nav buttons */
-    .corner{position:fixed; top:10px; width:120px; height:120px; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.35); border:2px solid rgba(255,255,255,.45); color:#fff; font-size:56px; border-radius:16px; backdrop-filter:blur(6px); cursor:pointer; z-index:2500; transition:transform .06s, background .2s}
+    .corner{position:fixed; bottom:0; width:50%; height:100px; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.35); border-top:2px solid rgba(255,255,255,.45); color:#fff; font-size:56px; backdrop-filter:blur(6px); cursor:pointer; z-index:1500; transition:transform .06s, background .2s; pointer-events:auto}
     .corner:hover{background:rgba(0,0,0,.45)}
     .corner:active,.corner.hit{transform:scale(.96); background:rgba(0,0,0,.55)}
-    #back{left:10px}
-    #fwd{right:10px}
+    #back{left:0; border-right:1px solid rgba(255,255,255,.45)}
+    #fwd{right:0; border-left:1px solid rgba(255,255,255,.45)}
   </style>
 </head>
 <body>
@@ -91,13 +91,12 @@
     const {HAND_CONNECTIONS} = window;
     const wv = document.getElementById('wv');
     const hud = document.getElementById('hud');
-    const ch = [document.getElementById('ch1'), document.getElementById('ch2')];
+    const ch = document.getElementById('ch1');
     const backBtn = document.getElementById('back');
     const fwdBtn = document.getElementById('fwd');
     
-    // State per hand
-    const state = [{},{pinch:0,was:false,start:{x:0,y:0},smooth:{x:0,y:0},last:{x:0,y:0},pan:{x:0,y:0},panned:false}];
-    for(let i=0;i<2;i++) state[i] = {pinch:0,was:false,start:{x:0,y:0},smooth:{x:0,y:0},last:{x:0,y:0},pan:{x:0,y:0},panned:false};
+    // State for single hand
+    const state = {pinch:0,was:false,start:{x:0,y:0},smooth:{x:0,y:0},last:{x:0,y:0},pan:{x:0,y:0},panned:false};
     let clickCool = 0;
     let navLock = false;
 
@@ -108,16 +107,65 @@
     const DEADZONE = 6;
     const PAN_THR = 2;
     const CLICK_COOL = 180;
-    const SCROLL_MULT = 3.5; // Increase vertical scroll sensitivity
+    const SCROLL_MULT = 3.5;
+
+    // Zoom wheel state
+    let wheelActive = false;
+    let wheelAngle = Math.PI;
+    let lastFingerAngle = null;
+    let wheelCenterX = 0;
+    let wheelCenterY = 0;
+    let wheelRadius = 110;
+    let guiScale = 1.0;
+    const GUI_SCALE_MIN = 0.60;
+    const GUI_SCALE_MAX = 1.80;
+    const GUI_SCALE_SENSITIVITY = 0.32;
 
     // Helpers
     const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
-    const showCH = (i,x,y) => { ch[i].style.left=x+'px'; ch[i].style.top=y+'px'; ch[i].classList.add('on'); };
-    const moveCH = (i,x,y) => { ch[i].style.left=x+'px'; ch[i].style.top=y+'px'; };
-    const pinchCH = (i,on) => ch[i].classList.toggle('pinch', on);
-    const pulseCH = i => { ch[i].classList.remove('pulse'); void ch[i].offsetWidth; ch[i].classList.add('pulse'); };
-    const hideCH = i => ch[i].classList.remove('on','pinch','pulse');
+    const showCH = (x,y) => { ch.style.left=x+'px'; ch.style.top=y+'px'; ch.classList.add('on'); };
+    const moveCH = (x,y) => { ch.style.left=x+'px'; ch.style.top=y+'px'; };
+    const pinchCH = (on) => ch.classList.toggle('pinch', on);
+    const pulseCH = () => { ch.classList.remove('pulse'); void ch.offsetWidth; ch.classList.add('pulse'); };
+    const hideCH = () => ch.classList.remove('on','pinch','pulse');
     const hit = (el) => { el.classList.add('hit'); setTimeout(()=>el.classList.remove('hit'), 140); };
+
+    // Helper functions for three-finger gesture
+    function getHandCenter(landmarks) {
+      let sumX = 0, sumY = 0;
+      for(let i = 0; i < landmarks.length; i++) {
+        sumX += landmarks[i].x;
+        sumY += landmarks[i].y;
+      }
+      return {x: sumX / landmarks.length, y: sumY / landmarks.length};
+    }
+
+    function detectThreeFingerGesture(landmarks) {
+      const indexTip = landmarks[8];
+      const middleTip = landmarks[12];
+      const ringTip = landmarks[16];
+      const thumbTip = landmarks[4];
+      const pinkyTip = landmarks[20];
+      
+      const indexExtended = landmarks[8].y < landmarks[6].y;
+      const middleExtended = landmarks[12].y < landmarks[10].y;
+      const ringExtended = landmarks[16].y < landmarks[14].y;
+      const thumbFolded = landmarks[4].y > landmarks[3].y;
+      const pinkyFolded = landmarks[20].y > landmarks[18].y;
+      
+      return indexExtended && middleExtended && ringExtended && thumbFolded && pinkyFolded;
+    }
+
+    function calculateFingerAngle(landmarks) {
+      const center = getHandCenter(landmarks);
+      const indexTip = landmarks[8];
+      return Math.atan2(indexTip.y - center.y, indexTip.x - center.x);
+    }
+
+    function drawWheel() {
+      // This function would draw the zoom wheel UI if needed
+      // Currently placeholder for visual feedback
+    }
 
     // Native events
     function click(vx,vy) {
@@ -154,85 +202,165 @@
       canvas.height = video.videoHeight || 480;
       ctx.clearRect(0,0,canvas.width,canvas.height);
       if(hands.length) {
-        for(const lm of hands) {
-          drawConnectors(ctx, lm, HAND_CONNECTIONS, {color:'#fff', lineWidth:3});
-          drawLandmarks(ctx, lm, {color:'#0f0', lineWidth:2, radius:6});
+        const lm = hands[0]; // Only draw first hand
+        drawConnectors(ctx, lm, HAND_CONNECTIONS, {color:'#fff', lineWidth:3});
+        drawLandmarks(ctx, lm, {color:'#0f0', lineWidth:2, radius:6});
+      }
+
+      // Get first hand (right hand priority if available)
+      let hand = null;
+      if(hands.length > 0) {
+        if(res.multiHandedness) {
+          for(let i=0; i<hands.length; i++) {
+            if(res.multiHandedness[i].label === 'Right') {
+              hand = hands[i];
+              break;
+            }
+          }
+        }
+        if(!hand) hand = hands[0]; // Fallback to first hand
+      }
+
+      // Three-finger wheel gesture (zoom control)
+      if(hand && detectThreeFingerGesture(hand)) {
+        if(!wheelActive) {
+          const hc = getHandCenter(hand);
+          wheelActive = true;
+          wheelCenterX = Math.round(hc.x * window.innerWidth);
+          wheelCenterY = Math.round(hc.y * window.innerHeight);
+          lastFingerAngle = null;
+          hud.textContent = 'ZOOM WHEEL ACTIVE';
+        }
+        const ang = calculateFingerAngle(hand);
+        if(lastFingerAngle !== null) {
+          let diff = ang - lastFingerAngle;
+          if(diff > Math.PI) diff -= 2 * Math.PI;
+          else if(diff < -Math.PI) diff += 2 * Math.PI;
+          wheelAngle = (wheelAngle + diff * 2) % (2 * Math.PI);
+          guiScale = Math.max(GUI_SCALE_MIN, Math.min(GUI_SCALE_MAX, guiScale + diff * GUI_SCALE_SENSITIVITY));
+          document.body.style.zoom = guiScale;
+          hud.textContent = `ZOOM: ${guiScale.toFixed(2)}x`;
+        }
+        lastFingerAngle = ang;
+      } else {
+        if(wheelActive) {
+          wheelActive = false;
+          lastFingerAngle = null;
+          hud.textContent = 'Pinch=click/drag';
         }
       }
 
-      for(let i=0;i<2;i++) {
-        const lm = hands[i];
-        if(!lm) { if(state[i].was) pulseCH(i); hideCH(i); state[i].was=false; continue; }
-        
-        // Mirror & smooth thumb tip
-        const mir = lm.map(p=>({...p, x:1-p.x}));
-        const raw = {x:mir[4].x, y:mir[4].y};
-        const s = state[i].smooth;
-        if(!s.x && !s.y) { s.x=raw.x; s.y=raw.y; }
-        s.x += SMOOTH*(raw.x-s.x);
-        s.y += SMOOTH*(raw.y-s.y);
-        
-        // View coords with deadzone
-        let vx = s.x*r.width, vy = s.y*r.height;
-        if(dist({x:vx,y:vy}, state[i].last) < DEADZONE) { vx=state[i].last.x; vy=state[i].last.y; }
-        else { state[i].last = {x:vx,y:vy}; }
-        
-        const sx = r.left+vx, sy = r.top+vy;
-        if(!ch[i].classList.contains('on')) showCH(i,sx,sy); else moveCH(i,sx,sy);
+      // Draw wheel overlay
+      drawWheel();
 
-        // Pinch detect
-        const d = dist(mir[4], mir[8]);
-        if(d < PINCH_DIST) state[i].pinch++; else state[i].pinch=0;
-        const pinch = state[i].pinch >= PINCH_FRAMES;
+      // Skip pinch detection when wheel is active
+      if(wheelActive) return;
 
-        if(pinch && !state[i].was) {
-          state[i].start = {x:vx/r.width, y:vy/r.height};
-          state[i].pan = {x:vx, y:vy};
-          state[i].panned = false;
-          pinchCH(i, true);
-          hud.textContent = 'Pinching…';
-        } else if(pinch && state[i].was) {
-          const dx = vx - state[i].pan.x;
-          const dy = vy - state[i].pan.y;
-          if(Math.abs(dx)>PAN_THR || Math.abs(dy)>PAN_THR) {
-            state[i].panned = true;
-            // Inverted: dragging down scrolls page down (positive deltaY), dragging up scrolls page up (negative deltaY)
-            // Multiply Y for more vertical sensitivity
-            scroll(vx, vy, dx * 1.5, dy * SCROLL_MULT);
-            state[i].pan = {x:vx, y:vy};
-            hud.textContent = 'PANNING…';
-          }
-        } else if(!pinch && state[i].was) {
-          pinchCH(i, false);
-          pulseCH(i);
-          
-          const el = document.elementFromPoint(Math.round(sx), Math.round(sy));
-          if(!state[i].panned && el) {
-            if(el.closest('#back')) { hit(backBtn); if(wv.canGoBack()) wv.goBack(); hud.textContent='◀ Back'; state[i].was=false; continue; }
-            if(el.closest('#fwd'))  { hit(fwdBtn); if(wv.canGoForward()) wv.goForward(); hud.textContent='Forward ▶'; state[i].was=false; continue; }
-          }
-          
-          if(!state[i].panned && performance.now()-clickCool > CLICK_COOL) {
-            clickCool = performance.now();
-            const cx = state[i].start.x*r.width, cy = state[i].start.y*r.height;
-            const ok = click(cx, cy);
-            hud.textContent = ok ? 'CLICK!' : 'Click failed';
-            setTimeout(()=>hud.textContent='Pinch=click/drag', ok?400:800);
-          } else setTimeout(()=>hud.textContent='Pinch=click/drag', 300);
-        }
-        state[i].was = pinch;
+      if(!hand) { 
+        if(state.was) pulseCH(); 
+        hideCH(); 
+        state.was=false; 
+        hud.textContent='Show hand to control';
+        return;
       }
       
-      if(!hands.length) { hideCH(0); hideCH(1); hud.textContent='Show hands to control'; }
+      // Mirror & smooth thumb tip
+      const mir = hand.map(p=>({...p, x:1-p.x}));
+      const raw = {x:mir[4].x, y:mir[4].y};
+      const s = state.smooth;
+      if(!s.x && !s.y) { s.x=raw.x; s.y=raw.y; }
+      s.x += SMOOTH*(raw.x-s.x);
+      s.y += SMOOTH*(raw.y-s.y);
+      
+      // View coords with deadzone - map to full screen including nav buttons
+      const fullHeight = window.innerHeight;
+      let vx = s.x*window.innerWidth, vy = s.y*fullHeight;
+      if(dist({x:vx,y:vy}, state.last) < DEADZONE) { vx=state.last.x; vy=state.last.y; }
+      else { state.last = {x:vx,y:vy}; }
+      
+      const sx = vx, sy = vy;
+      
+      // Check if cursor is over nav buttons - if so, don't send clicks to webview
+      const overNavButton = sy > window.innerHeight - 100;
+      
+      if(!ch.classList.contains('on')) showCH(sx,sy); else moveCH(sx,sy);
+
+      // Pinch detect
+      const d = dist(mir[4], mir[8]);
+      if(d < PINCH_DIST) state.pinch++; else state.pinch=0;
+      const pinch = state.pinch >= PINCH_FRAMES;
+
+      if(pinch && !state.was) {
+        state.start = {x:vx, y:vy};
+        state.pan = {x:vx, y:vy};
+        state.panned = false;
+        pinchCH(true);
+        hud.textContent = 'Pinching…';
+      } else if(pinch && state.was) {
+        const dx = vx - state.pan.x;
+        const dy = vy - state.pan.y;
+        if(Math.abs(dx)>PAN_THR || Math.abs(dy)>PAN_THR) {
+          state.panned = true;
+          // Only scroll if not over nav buttons
+          if(!overNavButton) {
+            // Convert screen coords to webview coords
+            const wvVx = vx - r.left;
+            const wvVy = vy - r.top;
+            scroll(wvVx, wvVy, dx * 1.5, dy * SCROLL_MULT);
+          }
+          state.pan = {x:vx, y:vy};
+          hud.textContent = overNavButton ? 'Over nav buttons' : 'PANNING…';
+        }
+      } else if(!pinch && state.was) {
+        pinchCH(false);
+        pulseCH();
+        
+        const el = document.elementFromPoint(Math.round(sx), Math.round(sy));
+        if(!state.panned && el) {
+          if(el.closest('#back')) { 
+            hit(backBtn); 
+            if(wv.canGoBack()) wv.goBack(); 
+            hud.textContent='◀ Back'; 
+            state.was=false; 
+            clickCool = performance.now();
+            return; 
+          }
+          if(el.closest('#fwd')) { 
+            hit(fwdBtn); 
+            if(wv.canGoForward()) wv.goForward(); 
+            hud.textContent='Forward ▶'; 
+            state.was=false; 
+            clickCool = performance.now();
+            return; 
+          }
+        }
+        
+        // Only attempt click if we didn't hit a nav button AND not over nav button area
+        if(!state.panned && !overNavButton && performance.now()-clickCool > CLICK_COOL) {
+          clickCool = performance.now();
+          // Convert screen coords to webview coords
+          const cx = state.start.x - r.left;
+          const cy = state.start.y - r.top;
+          const ok = click(cx, cy);
+          hud.textContent = ok ? 'CLICK!' : 'Click failed';
+          setTimeout(()=>hud.textContent='Pinch=click/drag', ok?400:800);
+        } else if(overNavButton && !state.panned) {
+          hud.textContent = 'Pinch on back/forward buttons';
+          setTimeout(()=>hud.textContent='Pinch=click/drag', 300);
+        } else if(!overNavButton) {
+          setTimeout(()=>hud.textContent='Pinch=click/drag', 300);
+        }
+      }
+      state.was = pinch;
     }
 
     // MediaPipe init
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
-    const hands = new Hands({locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
-    hands.setOptions({maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.5, minTrackingConfidence:0.5});
-    hands.onResults(onResults);
-    new Camera(video, {onFrame: async()=>hands.send({image:video}), width:640, height:480}).start()
+    const handsDetector = new Hands({locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+    handsDetector.setOptions({maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.5, minTrackingConfidence:0.5});
+    handsDetector.onResults(onResults);
+    new Camera(video, {onFrame: async()=>handsDetector.send({image:video}), width:640, height:480}).start()
       .then(()=>hud.textContent='Pinch=click/drag');
 
     // Chrome controls
